@@ -1,15 +1,12 @@
-"""Worker profile definitions and utilities."""
+"""Worker profile store and personalization utilities."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, Mapping, Sequence
+from typing import Mapping, Sequence
 
 import numpy as np
 import pandas as pd
-
-
-BASELINE_FEATURES = ("hr", "hrv_rmssd", "gsr")
 
 
 @dataclass
@@ -18,160 +15,97 @@ class BaselineStats:
     sigma: float
 
 
-@dataclass
-class WorkerProfile:
-    worker_id: str
-    experience_level: int
-    specialization_id: int
-    baselines: Dict[str, BaselineStats]
-
-    def to_vector(self, feature_order: Sequence[str]) -> list[float]:
-        vector: list[float] = [float(self.experience_level), float(self.specialization_id)]
-        for feature in feature_order:
-            stats = self.baselines.get(feature)
-            if stats is None:
-                vector.extend([0.0, 1.0])
-            else:
-                vector.extend([float(stats.mu), float(stats.sigma)])
-        return vector
-
-
 class WorkerProfileStore:
-    """Store per-worker baseline statistics and metadata."""
+    """Maintains per-worker baseline stats with EMA updates."""
 
-    def __init__(
-        self,
-        profiles: Dict[str, WorkerProfile],
-        global_baselines: Mapping[str, BaselineStats],
-        feature_order: Sequence[str] = BASELINE_FEATURES,
-    ) -> None:
-        self._profiles = profiles
-        self._global_baselines = dict(global_baselines)
-        self._feature_order = tuple(feature_order)
-
-    @property
-    def feature_order(self) -> tuple[str, ...]:
-        return self._feature_order
-
-    def get(self, worker_id: str) -> WorkerProfile | None:
-        return self._profiles.get(worker_id)
-
-    def get_baseline(self, worker_id: str, feature: str) -> BaselineStats:
-        profile = self._profiles.get(worker_id)
-        if profile and feature in profile.baselines:
-            return profile.baselines[feature]
-        return self._global_baselines.get(feature, BaselineStats(mu=0.0, sigma=1.0))
-
-    def get_profile_vector(self, worker_id: str) -> list[float]:
-        profile = self._profiles.get(worker_id)
-        if profile is None:
-            fallback_profile = WorkerProfile(
-                worker_id=worker_id,
-                experience_level=0,
-                specialization_id=0,
-                baselines={f: self.get_baseline(worker_id, f) for f in self._feature_order},
-            )
-            return fallback_profile.to_vector(self._feature_order)
-        return profile.to_vector(self._feature_order)
-
-    def global_baseline(self, feature: str) -> BaselineStats:
-        return self._global_baselines.get(feature, BaselineStats(mu=0.0, sigma=1.0))
-
-    def as_static_frame(self) -> pd.DataFrame:
-        """Return a dataframe containing static covariates for each worker."""
-        rows: list[dict[str, float]] = []
-        for worker_id, profile in self._profiles.items():
-            vector = self.get_profile_vector(worker_id)
-            columns = ["experience_level", "specialization_id"]
-            for feature in self._feature_order:
-                columns.extend([f"baseline_mu_{feature}", f"baseline_sigma_{feature}"])
-            row = dict(zip(columns, vector, strict=False))
-            row["worker_id"] = worker_id
-            rows.append(row)
-
-        if not rows:
-            return pd.DataFrame(
-                columns=["worker_id", "experience_level", "specialization_id"]
-                + [
-                    col
-                    for feature in self._feature_order
-                    for col in (f"baseline_mu_{feature}", f"baseline_sigma_{feature}")
-                ]
-            )
-
-        df = pd.DataFrame(rows)
-        return df
-
-    @classmethod
-    def from_dataframe(
-        cls,
-        df: pd.DataFrame,
-        feature_cols: Sequence[str] = BASELINE_FEATURES,
-        worker_col: str = "worker_id",
-        experience_col: str = "experience_level_bin",
-        specialization_col: str = "specialization_id",
-        safe_flag_column: str | None = None,
-        alpha: float = 0.1,
-        min_sigma: float = 1e-3,
-    ) -> "WorkerProfileStore":
-        feature_order = tuple(feature_cols)
-        safe_mask = pd.Series(True, index=df.index)
-        if safe_flag_column and safe_flag_column in df.columns:
-            safe_mask = df[safe_flag_column].fillna(1).astype(bool)
-
-        profiles: dict[str, WorkerProfile] = {}
-        global_baselines: dict[str, BaselineStats] = {
-            feature: BaselineStats(mu=0.0, sigma=1.0) for feature in feature_order
+    def __init__(self, physiology_cols: Sequence[str]) -> None:
+        self.physiology_cols = tuple(physiology_cols)
+        self._profiles: dict[str, dict[str, BaselineStats]] = {}
+        self._meta: dict[str, dict[str, int]] = {}
+        self._global: dict[str, BaselineStats] = {
+            col: BaselineStats(mu=0.0, sigma=1.0) for col in self.physiology_cols
         }
 
-        global_values: dict[str, list[float]] = {feature: [] for feature in feature_order}
-        for feature in feature_order:
-            values = df.loc[safe_mask, feature].dropna().astype(float).tolist()
-            if values:
-                global_values[feature] = values
-                mu = float(np.mean(values))
-                sigma = float(np.std(values) + min_sigma)
-                global_baselines[feature] = BaselineStats(mu=mu, sigma=max(sigma, min_sigma))
+    def fit_baselines(
+        self,
+        df: pd.DataFrame,
+        alpha: float = 0.1,
+        safe_col: str | None = None,
+        worker_col: str = "worker_id",
+    ) -> None:
+        mask = pd.Series(True, index=df.index)
+        if safe_col and safe_col in df.columns:
+            mask = df[safe_col].fillna(1).astype(bool)
+
+        for col in self.physiology_cols:
+            values = df.loc[mask, col].dropna().astype(float)
+            if not values.empty:
+                mu = float(values.mean())
+                sigma = float(values.std() + 1e-6)
+                self._global[col] = BaselineStats(mu=mu, sigma=sigma)
 
         for worker_id, worker_df in df.groupby(worker_col):
-            mask = safe_mask.loc[worker_df.index]
-            worker_safe = worker_df[mask.values]
-            if worker_safe.empty:
-                worker_safe = worker_df
-            baselines = cls._compute_worker_baselines(worker_safe, feature_order, alpha, min_sigma)
-            experience = int(worker_df[experience_col].iloc[0]) if experience_col in worker_df.columns else 0
-            specialization = (
-                int(worker_df[specialization_col].iloc[0]) if specialization_col in worker_df.columns else 0
-            )
-            profiles[worker_id] = WorkerProfile(
-                worker_id=str(worker_id),
-                experience_level=experience,
-                specialization_id=specialization,
-                baselines=baselines,
-            )
+            worker_mask = mask.loc[worker_df.index]
+            safe_df = worker_df[worker_mask.values]
+            if safe_df.empty:
+                safe_df = worker_df
+            self._profiles[str(worker_id)] = self._ema_stats(safe_df, alpha)
+            self._meta[str(worker_id)] = self._derive_meta(worker_df)
 
-        return cls(profiles=profiles, global_baselines=global_baselines, feature_order=feature_order)
-
-    @staticmethod
-    def _compute_worker_baselines(
-        df: pd.DataFrame,
-        feature_order: Sequence[str],
-        alpha: float,
-        min_sigma: float,
-    ) -> Dict[str, BaselineStats]:
-        baselines: dict[str, BaselineStats] = {}
-        for feature in feature_order:
-            series = df[feature].dropna().astype(float)
+    def _ema_stats(self, df: pd.DataFrame, alpha: float) -> dict[str, BaselineStats]:
+        stats: dict[str, BaselineStats] = {}
+        for col in self.physiology_cols:
+            series = df[col].dropna().astype(float)
             if series.empty:
-                baselines[feature] = BaselineStats(mu=0.0, sigma=1.0)
+                stats[col] = self._global[col]
                 continue
-
-            mu = series.iloc[0]
+            mu = float(series.iloc[0])
             second = mu**2
             for value in series.iloc[1:]:
-                mu = (1 - alpha) * mu + alpha * value
-                second = (1 - alpha) * second + alpha * (value**2)
-            variance = max(second - mu**2, min_sigma**2)
-            sigma = float(np.sqrt(variance))
-            baselines[feature] = BaselineStats(mu=float(mu), sigma=sigma)
-        return baselines
+                mu = (1 - alpha) * mu + alpha * float(value)
+                second = (1 - alpha) * second + alpha * float(value) ** 2
+            variance = max(second - mu**2, 1e-6)
+            stats[col] = BaselineStats(mu=mu, sigma=float(np.sqrt(variance)))
+        return stats
+
+    def _derive_meta(self, df: pd.DataFrame) -> dict[str, int]:
+        if "specialization_id" in df.columns:
+            specialization_id = int(df["specialization_id"].iloc[0])
+        else:
+            specialization_id = abs(hash(str(df["worker_id"].iloc[0]))) % 5
+        if "experience_level" in df.columns:
+            exp = int(df["experience_level"].iloc[0])
+        else:
+            exp = 1 + abs(hash(str(df["worker_id"].iloc[0]))) % 5
+        experience_level = min(max(exp, 1), 5)
+        return {"specialization_id": specialization_id, "experience_level": experience_level}
+
+    def transform_zscore(self, df: pd.DataFrame, worker_col: str = "worker_id") -> pd.DataFrame:
+        frame = df.copy()
+        for col in self.physiology_cols:
+            mu_col = f"baseline_mu_{col}"
+            sigma_col = f"baseline_sigma_{col}"
+            frame[mu_col] = frame[worker_col].astype(str).map(
+                lambda w: self._profiles.get(w, {}).get(col, self._global[col]).mu
+            )
+            frame[sigma_col] = frame[worker_col].astype(str).map(
+                lambda w: self._profiles.get(w, {}).get(col, self._global[col]).sigma
+            )
+            frame[sigma_col] = frame[sigma_col].replace(0, 1e-6)
+            frame[col] = (frame[col] - frame[mu_col]) / frame[sigma_col]
+        return frame
+
+    def get_static_profile_table(self) -> pd.DataFrame:
+        rows = []
+        for worker_id, stats in self._profiles.items():
+            meta = self._meta.get(worker_id, {"specialization_id": 0, "experience_level": 1})
+            row = {
+                "worker_id": worker_id,
+                "specialization_id": meta["specialization_id"],
+                "experience_level": meta["experience_level"],
+            }
+            for col in self.physiology_cols:
+                row[f"baseline_mu_{col}"] = stats[col].mu
+                row[f"baseline_sigma_{col}"] = stats[col].sigma
+            rows.append(row)
+        return pd.DataFrame(rows)

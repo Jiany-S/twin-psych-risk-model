@@ -1,0 +1,77 @@
+"""Metrics for classification and regression."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    brier_score_loss,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    roc_curve,
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+)
+
+
+def expected_calibration_error(probs: np.ndarray, y_true: np.ndarray, bins: int = 10) -> float:
+    bin_edges = np.linspace(0.0, 1.0, bins + 1)
+    ece = 0.0
+    for start, end in zip(bin_edges[:-1], bin_edges[1:], strict=False):
+        mask = (probs >= start) & (probs < end)
+        if not np.any(mask):
+            continue
+        acc = y_true[mask].mean()
+        conf = probs[mask].mean()
+        ece += (mask.sum() / len(y_true)) * abs(acc - conf)
+    return float(ece)
+
+
+def optimal_threshold(y_true: np.ndarray, probs: np.ndarray, mode: str = "youden") -> float:
+    if mode == "f1":
+        thresholds = np.linspace(0.05, 0.95, 50)
+        scores = [f1_score(y_true, probs >= t) for t in thresholds]
+        return float(thresholds[int(np.argmax(scores))])
+    fpr, tpr, thr = roc_curve(y_true, probs)
+    youden = tpr - fpr
+    return float(thr[int(np.argmax(youden))])
+
+
+def classification_metrics(y_true: np.ndarray, probs: np.ndarray) -> dict[str, Any]:
+    probs = np.clip(probs, 1e-6, 1 - 1e-6)
+    y_pred = probs >= 0.5
+    auc = roc_auc_score(y_true, probs)
+    auprc = average_precision_score(y_true, probs)
+    brier = brier_score_loss(y_true, probs)
+    ece = expected_calibration_error(probs, y_true, bins=15)
+    optimal_thr = optimal_threshold(y_true, probs, mode="youden")
+    optimal_pred = probs >= optimal_thr
+
+    return {
+        "auroc": float(auc),
+        "auprc": float(auprc),
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "f1": float(f1_score(y_true, y_pred)),
+        "precision": float(precision_score(y_true, y_pred)),
+        "recall": float(recall_score(y_true, y_pred)),
+        "brier": float(brier),
+        "ece": float(ece),
+        "confusion_matrix_default": confusion_matrix(y_true, y_pred).tolist(),
+        "optimal_threshold": float(optimal_thr),
+        "confusion_matrix_optimal": confusion_matrix(y_true, optimal_pred).tolist(),
+    }
+
+
+def regression_metrics(y_true: np.ndarray, preds: np.ndarray) -> dict[str, Any]:
+    mae = mean_absolute_error(y_true, preds)
+    rmse = mean_squared_error(y_true, preds, squared=False)
+    r2 = r2_score(y_true, preds)
+    return {"mae": float(mae), "rmse": float(rmse), "r2": float(r2)}

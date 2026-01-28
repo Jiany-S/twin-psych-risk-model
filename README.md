@@ -1,99 +1,56 @@
-# Cognitive Risk Forecasting
+# Risk Forecasting with XGBoost + TFT
 
-An end-to-end research template for cognitive risk forecasting in human–robot construction environments. The repository bootstraps preprocessing, worker profiling, Temporal Fusion Transformer (TFT) training, baseline comparisons, and calibration.
+This repository trains and compares two short-horizon risk forecasting models on multimodal time-series:
+1) XGBoost baseline with engineered window features
+2) Temporal Fusion Transformer (TFT) using PyTorch Forecasting
 
-## Repository Layout
-```
-cdt-risk-forecasting/
-├── data/
-│   ├── raw/            # drop WESAD-like CSV files here (per worker)
-│   └── processed/      # generated train.csv
-├── docs/
-│   ├── problem_definition.md
-│   └── weekly_reports/2025-11-17.md
-├── notebooks/
-│   ├── 01_explore_data.ipynb
-│   └── 02_tft_prototype.ipynb
-├── src/
-│   ├── data/           # loading & preprocessing
-│   ├── profiles/       # worker profile store + normalization
-│   ├── models/         # baselines + TFT utilities
-│   └── training/       # CLI entry points
-└── src/config/default.yaml
+The pipeline runs end-to-end with a single command and automatically generates a realistic synthetic dataset if raw data is missing.
+
+## One-command run
+```bash
+python -m src.run_experiment --config src/config/default.yaml
 ```
 
-## Data Expectations
-Place public physiological data (e.g., WESAD) under `data/raw/` as CSV files with at least these columns:
+Artifacts are saved under `experiments/runs/<timestamp>/` including metrics, plots, and a markdown report.
 
-| Column | Description |
-| --- | --- |
-| `time_idx` | monotonically increasing integer index per worker (auto-generated if missing) |
-| `worker_id` | unique worker identifier (inferred from filename if absent) |
-| `target` | future stress/risk label in `[0, 1]` |
-| `hr`, `hrv_rmssd`, `gsr` | physiological signals |
-| `distance_to_robot`, `robot_speed`, `hazard_zone` | known covariates (auto-filled with zeros when omitted) |
-| optional: `experience_level`, `specialization_id`, `safe_flag` |
+## Data schema
+Place a single CSV at `data/raw/data.csv` or multiple CSVs under `data/raw/`. Minimum columns:
+- `time_idx` (int, increasing per worker)
+- `worker_id` (str/int)
+- `target` (0/1 or float in [0,1])
+- `hr`, `hrv_rmssd`, `gsr`
+- `distance_to_robot`, `robot_speed`
 
-The preprocessing stage writes `data/processed/train.csv` that already contains:
-- normalized physiology per worker (personalized z-score),
-- worker profile stats: `baseline_mu_*` / `baseline_sigma_*`,
-- static categorical covariates: `worker_id`, `specialization_id`, `experience_level_bin`.
+Optional columns (auto-filled if missing):
+- `hazard_zone` (int/cat, default 0)
+- `task_phase` (cat, default "default")
 
-## Worker Profiles
-`WorkerProfileStore` maintains per-worker exponential moving averages (EMA) for `hr`, `hrv_rmssd`, and `gsr`. Updates only consider samples flagged as safe (column `safe_flag`), or all samples when the flag is absent. For each worker we export:
+If raw data is absent, synthetic data is generated and stored under `data/raw/`.
+
+## Worker profiles
+Per-worker baseline stats (mu/sigma) are tracked using EMA and used by both models.
+Static features:
 ```
-[experience_level_bin, specialization_id,
- mu_hr, sigma_hr,
- mu_hrv, sigma_hrv,
- mu_gsr, sigma_gsr]
+experience_level (binned), specialization_id,
+mu_hr, sigma_hr, mu_hrv, sigma_hrv, mu_gsr, sigma_gsr
 ```
-These vectors act as static covariates for TFT and provide personalized normalization when z-scoring physiology.
 
-## Quickstart
-1. **Preprocess data**
-   ```bash
-   python -m src.data.preprocess --config src/config/default.yaml
-   ```
-2. **Train baselines (logistic regression + GRU)**
-   ```bash
-   python -m src.training.train_baseline --config src/config/default.yaml
-   ```
-3. **Train TFT**
-   ```bash
-   python -m src.training.train_tft --config src/config/default.yaml
-   ```
-4. **Evaluate models + calibration**
-   ```bash
-   python -m src.training.evaluate --config src/config/default.yaml --model all --calibrate
-   ```
+Profiles are used as:
+- TFT static covariates (categorical + real)
+- XGBoost features appended to window-engineered features
 
-## Configuration
-All hyperparameters, column names, and paths live in `src/config/default.yaml`. Key entries:
-- `paths.*`: raw/processed/artifact directories.
-- `data.window_length` / `data.prediction_horizon`: encoder length `T` and forecasting horizon `Δt`.
-- `profile.*`: EMA decay and safe flag column.
-- `training.*`: batch size, learning rate, epochs, GPU count.
-- `baseline.*`: feature columns for logistic/GRU, GRU hidden size/layers.
-- `evaluation.ece_bins`: bins for expected calibration error.
+## Switching classification vs regression
+In `src/config/default.yaml` set:
+- `task.task_type: classification` or `regression`
+- `task.risk_threshold` (for binarizing continuous targets when classification)
 
-## Baselines & TFT
-- **Logistic Regression** uses tabular snapshots (physiology, robot context, static profile stats).
-- **GRU Baseline** consumes sliding windows of the same features.
-- **Temporal Fusion Transformer** (PyTorch Forecasting + Lightning) leverages:
-  - static categorical covariates: worker id, specialization id, binned experience level,
-  - static real covariates: worker baseline stats,
-  - known real covariates: robot context,
-  - observed real covariates: personalized physiological streams.
+## Outputs
+`experiments/runs/<timestamp>/`
+- `metrics.json` (per-model metrics + comparison)
+- `results.md` (summary report)
+- `plots/*.png` (ROC, PR, calibration, confusion matrix, time-series, feature importance)
+- model artifacts (XGBoost model, TFT checkpoint)
 
-## Calibration & Metrics
-`src/training/evaluate.py` reports AUROC, AUPRC, and Expected Calibration Error (ECE). Enable temperature scaling with `--calibrate` to fit a validation-based temperature parameter before scoring the test split. `src/training/calibrate.py` also exposes a standalone CLI for temperature scaling arbitrary prediction files.
-
-## Notebooks
-- `01_explore_data.ipynb`: inspect processed CSV, visualize profiles.
-- `02_tft_prototype.ipynb`: interactively explore TFT hyper-parameters.
-
-## Development Notes
-- Python 3.10+, dependencies in `requirements.txt`.
-- No external web calls—datasets must already be local.
-- Logging is CLI-friendly via `src/utils/logging.py`.
-- Random seeds handled via `src/utils/seed.py`.
+## Notes
+- The default config is CPU-friendly and finishes quickly on a synthetic dataset.
+- All splits are chronological within each worker to avoid leakage.

@@ -1,1 +1,1 @@
-"""cdt-risk-forecasting package."""
+"""Risk forecasting experiment package."""
