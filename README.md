@@ -11,7 +11,7 @@ The pipeline runs end-to-end with a single command and automatically generates a
 python -m src.run_experiment --config src/config/default.yaml
 ```
 
-Artifacts are saved under `experiments/runs/<timestamp>/` including metrics, plots, and a markdown report.
+Artifacts are saved under `experiments/runs/<timestamp>/` including metrics, plots, models, processed data, and a markdown report.
 
 ## Data schema
 Place a single CSV at `data/raw/data.csv` or multiple CSVs under `data/raw/`. Minimum columns:
@@ -28,7 +28,7 @@ Optional columns (auto-filled if missing):
 If raw data is absent, synthetic data is generated and stored under `data/raw/`.
 
 ## Worker profiles
-Per-worker baseline stats (mu/sigma) are tracked using EMA and used by both models.
+Per-worker baseline stats (mu/sigma) are tracked using EMA and used by both models. Baselines are fit on the **train split only** to avoid leakage, then applied to val/test.
 Static features:
 ```
 experience_level (binned), specialization_id,
@@ -43,6 +43,7 @@ Profiles are used as:
 In `src/config/default.yaml` set:
 - `task.task_type: classification` or `regression`
 - `task.risk_threshold` (for binarizing continuous targets when classification)
+- `task.horizon_steps` / `task.window_length` to control forecasting horizon and encoder length
 
 ## Outputs
 `experiments/runs/<timestamp>/`

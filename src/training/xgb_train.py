@@ -52,6 +52,8 @@ def train_xgb_pipeline(
     run_dir: Path,
 ) -> XGBArtifacts:
     feature_matrix, feature_names = prepare_features(windows, meta, static_profiles, feature_cols)
+    if np.isnan(feature_matrix).any():
+        raise ValueError("NaNs detected in engineered XGBoost features.")
 
     train_idx = split_indices["train"]
     val_idx = split_indices["val"]

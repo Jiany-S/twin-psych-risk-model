@@ -29,13 +29,16 @@ def build_tft_datasets(
     pf = _require_tft()
     TimeSeriesDataSet = pf.TimeSeriesDataSet
 
+    min_encoder_length = max(2, window_length // 2)
     training = TimeSeriesDataSet(
         train_df,
         time_idx=schema.time_idx,
         target=schema.target,
         group_ids=[schema.worker_id],
         max_encoder_length=window_length,
+        min_encoder_length=min_encoder_length,
         max_prediction_length=horizon,
+        min_prediction_length=horizon,
         static_categoricals=["worker_id", "specialization_id", "experience_level"],
         static_reals=[f"baseline_mu_{f}" for f in schema.physiology]
         + [f"baseline_sigma_{f}" for f in schema.physiology],
@@ -46,7 +49,8 @@ def build_tft_datasets(
         add_target_scales=False,
         target_normalizer=None,
     )
-    validation = TimeSeriesDataSet.from_dataset(training, val_df, predict=True, stop_randomization=True)
+    # Validation should be created with predict=False for proper loss/early stopping.
+    validation = TimeSeriesDataSet.from_dataset(training, val_df, predict=False, stop_randomization=True)
     return training, validation
 
 
@@ -54,6 +58,17 @@ def create_tft_model(training_dataset: Any, cfg: dict[str, Any]) -> Any:
     pf = _require_tft()
     TemporalFusionTransformer = pf.TemporalFusionTransformer
     QuantileLoss = pf.metrics.QuantileLoss
+    loss_mode = cfg.get("tft_loss", "quantile")
+    if loss_mode == "bce":
+        try:
+            import torch
+
+            loss_fn = torch.nn.BCEWithLogitsLoss()
+        except Exception:
+            loss_fn = QuantileLoss(quantiles=[0.5])
+            loss_mode = "quantile"
+    else:
+        loss_fn = QuantileLoss(quantiles=[0.5])
     return TemporalFusionTransformer.from_dataset(
         training_dataset,
         learning_rate=cfg.get("learning_rate", 1e-3),
@@ -61,7 +76,7 @@ def create_tft_model(training_dataset: Any, cfg: dict[str, Any]) -> Any:
         lstm_layers=cfg.get("lstm_layers", 1),
         dropout=cfg.get("dropout", 0.1),
         attention_head_size=4,
-        loss=QuantileLoss(quantiles=[0.5]),
+        loss=loss_fn,
         log_interval=10,
         reduce_on_plateau_patience=3,
     )

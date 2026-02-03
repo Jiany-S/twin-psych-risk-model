@@ -48,26 +48,32 @@ def train_xgboost(
             eval_metric="logloss",
             **common_params,
         )
-        model.fit(
-            X_train,
-            y_train,
-            eval_set=[(X_val, y_val)],
-            verbose=False,
-            early_stopping_rounds=params.get("early_stopping_rounds", 25),
-        )
+        try:
+            model.fit(
+                X_train,
+                y_train,
+                eval_set=[(X_val, y_val)],
+                verbose=False,
+                early_stopping_rounds=params.get("early_stopping_rounds", 25),
+            )
+        except TypeError:
+            model.fit(X_train, y_train)
     else:
         model = xgb.XGBRegressor(
             objective="reg:squarederror",
             eval_metric="rmse",
             **common_params,
         )
-        model.fit(
-            X_train,
-            y_train,
-            eval_set=[(X_val, y_val)],
-            verbose=False,
-            early_stopping_rounds=params.get("early_stopping_rounds", 25),
-        )
+        try:
+            model.fit(
+                X_train,
+                y_train,
+                eval_set=[(X_val, y_val)],
+                verbose=False,
+                early_stopping_rounds=params.get("early_stopping_rounds", 25),
+            )
+        except TypeError:
+            model.fit(X_train, y_train)
 
     calibrator = None
     if task_type == "classification":

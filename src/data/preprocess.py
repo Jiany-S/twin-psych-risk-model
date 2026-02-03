@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 
 from .schema import DataSchema
-from ..profiles.worker_profile import WorkerProfileStore
 
 
 def _ensure_columns(df: pd.DataFrame, schema: DataSchema) -> pd.DataFrame:
@@ -28,21 +27,12 @@ def _ensure_columns(df: pd.DataFrame, schema: DataSchema) -> pd.DataFrame:
     return frame
 
 
-def preprocess_dataframe(cfg: Mapping[str, object], df: pd.DataFrame, schema: DataSchema) -> tuple[pd.DataFrame, WorkerProfileStore]:
+def preprocess_dataframe(cfg: Mapping[str, object], df: pd.DataFrame, schema: DataSchema) -> pd.DataFrame:
+    """Schema enforcement only. Baselines are fit after splitting to avoid leakage."""
     frame = _ensure_columns(df, schema)
     frame[schema.worker_id] = frame[schema.worker_id].astype(str)
     frame[schema.time_idx] = frame[schema.time_idx].astype(int)
     frame[schema.target] = frame[schema.target].astype(float).clip(0.0, 1.0)
-
-    profile_cfg = cfg.get("profile", {})
-    store = WorkerProfileStore(schema.physiology)
-    store.fit_baselines(
-        frame,
-        alpha=float(profile_cfg.get("ema_alpha", 0.1)),
-        safe_col=profile_cfg.get("safe_col"),
-        worker_col=schema.worker_id,
-    )
-    frame = store.transform_zscore(frame, worker_col=schema.worker_id)
 
     for col in schema.robot_context:
         frame[col] = frame[col].astype(float)
@@ -52,4 +42,4 @@ def preprocess_dataframe(cfg: Mapping[str, object], df: pd.DataFrame, schema: Da
     frame[schema.task_phase] = frame[schema.task_phase].fillna("default").astype(str)
 
     frame = frame.sort_values([schema.worker_id, schema.time_idx]).reset_index(drop=True)
-    return frame, store
+    return frame
