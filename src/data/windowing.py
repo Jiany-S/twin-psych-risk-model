@@ -1,28 +1,23 @@
-"""Windowing and feature engineering."""
+"""Windowing, chronological split, and feature engineering."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from .features import extract_window_features
 from .schema import DataSchema
 
 
 @dataclass
 class WindowedData:
     X_windows: np.ndarray
-    y: np.ndarray
+    y_stress: np.ndarray
+    y_comfort: np.ndarray
     meta: pd.DataFrame
-    flat: pd.DataFrame
-
-
-def _encode_task_phase(series: pd.Series) -> pd.Series:
-    if series.dtype.name == "category":
-        return series.cat.codes
-    return series.astype("category").cat.codes
 
 
 def create_time_splits(
@@ -31,25 +26,92 @@ def create_time_splits(
     train_ratio: float,
     val_ratio: float,
     test_ratio: float,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     if not np.isclose(train_ratio + val_ratio + test_ratio, 1.0):
         raise ValueError("Train/val/test ratios must sum to 1.")
-    train_rows = []
-    val_rows = []
-    test_rows = []
-    for _, worker_df in df.groupby(schema.worker_id):
-        worker_df = worker_df.sort_values(schema.time_idx)
+    train_rows: list[pd.DataFrame] = []
+    val_rows: list[pd.DataFrame] = []
+    test_rows: list[pd.DataFrame] = []
+    split_manifest: list[pd.DataFrame] = []
+
+    for worker_id, worker_df in df.groupby(schema.worker_id):
+        worker_df = worker_df.sort_values(schema.time_idx).reset_index(drop=True)
         n = len(worker_df)
         train_end = int(n * train_ratio)
         val_end = int(n * (train_ratio + val_ratio))
-        train_rows.append(worker_df.iloc[:train_end])
-        val_rows.append(worker_df.iloc[train_end:val_end])
-        test_rows.append(worker_df.iloc[val_end:])
+        train_part = worker_df.iloc[:train_end].copy()
+        val_part = worker_df.iloc[train_end:val_end].copy()
+        test_part = worker_df.iloc[val_end:].copy()
+        train_rows.append(train_part)
+        val_rows.append(val_part)
+        test_rows.append(test_part)
+        for split_name, split_df in (("train", train_part), ("val", val_part), ("test", test_part)):
+            split_manifest.append(
+                pd.DataFrame(
+                    {
+                        "worker_id": split_df[schema.worker_id].astype(str),
+                        "row_time_idx": split_df[schema.time_idx].astype(int),
+                        "split": split_name,
+                    }
+                )
+            )
+
     return (
         pd.concat(train_rows, ignore_index=True),
         pd.concat(val_rows, ignore_index=True),
         pd.concat(test_rows, ignore_index=True),
+        pd.concat(split_manifest, ignore_index=True),
     )
+
+
+def create_subject_holdout_splits(
+    df: pd.DataFrame,
+    schema: DataSchema,
+    train_subjects: list[str],
+    val_subjects: list[str],
+    test_subjects: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    train_set = {str(s) for s in train_subjects}
+    val_set = {str(s) for s in val_subjects}
+    test_set = {str(s) for s in test_subjects}
+    if train_set & val_set or train_set & test_set or val_set & test_set:
+        raise ValueError("Subject-holdout split has overlapping subject IDs across train/val/test.")
+
+    all_subjects = set(df[schema.worker_id].astype(str).unique())
+    missing = (train_set | val_set | test_set) - all_subjects
+    if missing:
+        raise ValueError(f"Requested subjects not found in dataset: {sorted(missing)}")
+
+    train_df = df[df[schema.worker_id].astype(str).isin(train_set)].copy()
+    val_df = df[df[schema.worker_id].astype(str).isin(val_set)].copy()
+    test_df = df[df[schema.worker_id].astype(str).isin(test_set)].copy()
+    split_manifest = pd.concat(
+        [
+            pd.DataFrame(
+                {
+                    "worker_id": train_df[schema.worker_id].astype(str),
+                    "row_time_idx": train_df[schema.time_idx].astype(int),
+                    "split": "train",
+                }
+            ),
+            pd.DataFrame(
+                {
+                    "worker_id": val_df[schema.worker_id].astype(str),
+                    "row_time_idx": val_df[schema.time_idx].astype(int),
+                    "split": "val",
+                }
+            ),
+            pd.DataFrame(
+                {
+                    "worker_id": test_df[schema.worker_id].astype(str),
+                    "row_time_idx": test_df[schema.time_idx].astype(int),
+                    "split": "test",
+                }
+            ),
+        ],
+        ignore_index=True,
+    )
+    return train_df, val_df, test_df, split_manifest
 
 
 def build_windows(
@@ -57,35 +119,33 @@ def build_windows(
     schema: DataSchema,
     window_length: int,
     horizon_steps: int,
-    task_type: str,
-    risk_threshold: float,
 ) -> WindowedData:
-    frame = df.copy()
-    frame[schema.task_phase] = _encode_task_phase(frame[schema.task_phase])
+    feature_cols = list(schema.physiology) + list(schema.robot_context)
+    for optional_signal in ("resp", "accel"):
+        if optional_signal in df.columns and optional_signal not in feature_cols:
+            feature_cols.append(optional_signal)
+    if schema.hazard_zone in df.columns:
+        feature_cols.append(schema.hazard_zone)
 
-    feature_cols = list(schema.physiology) + list(schema.robot_context) + [schema.hazard_zone, schema.task_phase]
-
-    windows = []
-    labels = []
-    metas = []
-    for worker_id, worker_df in frame.groupby(schema.worker_id):
+    windows: list[np.ndarray] = []
+    y_stress: list[float] = []
+    y_comfort: list[float] = []
+    metas: list[dict[str, Any]] = []
+    for worker_id, worker_df in df.groupby(schema.worker_id):
         worker_df = worker_df.sort_values(schema.time_idx).reset_index(drop=True)
         values = worker_df[feature_cols].to_numpy(dtype=float)
-        targets = worker_df[schema.target].to_numpy(dtype=float)
+        stress = worker_df[schema.stress_target].to_numpy(dtype=float)
+        comfort = worker_df[schema.comfort_target].to_numpy(dtype=float)
         times = worker_df[schema.time_idx].to_numpy(dtype=int)
-
         for start in range(0, len(worker_df) - window_length - horizon_steps + 1):
             end = start + window_length
             label_idx = end + horizon_steps - 1
-            window = values[start:end]
-            label = targets[label_idx]
-            if task_type == "classification":
-                label = float(label >= risk_threshold)
-            windows.append(window)
-            labels.append(label)
+            windows.append(values[start:end])
+            y_stress.append(stress[label_idx])
+            y_comfort.append(comfort[label_idx])
             metas.append(
                 {
-                    "worker_id": worker_id,
+                    "worker_id": str(worker_id),
                     "start_idx": int(times[start]),
                     "end_idx": int(times[end - 1]),
                     "label_time_idx": int(times[label_idx]),
@@ -93,69 +153,60 @@ def build_windows(
             )
 
     if not windows:
-        raise ValueError("Insufficient data to build windows. Check window length and horizon.")
-
-    X = np.stack(windows).astype(np.float32)
-    y = np.array(labels).astype(np.float32)
-    meta = pd.DataFrame(metas)
-
-    return WindowedData(X_windows=X, y=y, meta=meta, flat=frame)
+        raise ValueError("Insufficient data to build windows. Check window_length and horizon_steps.")
+    return WindowedData(
+        X_windows=np.stack(windows).astype(np.float32),
+        y_stress=np.array(y_stress, dtype=np.float32),
+        y_comfort=np.array(y_comfort, dtype=np.float32),
+        meta=pd.DataFrame(metas),
+    )
 
 
 def engineer_window_features(
     windows: np.ndarray,
-    feature_names: Sequence[str],
+    schema: DataSchema,
+    sampling_rate_hz: float,
+    include_freq_domain: bool,
+    scr_threshold: float,
+    min_scr_distance: int,
 ) -> tuple[np.ndarray, list[str]]:
-    n_windows, length, n_features = windows.shape
-    feats = []
-    names = []
-    x = windows
+    cols = list(schema.physiology) + list(schema.robot_context)
+    if "ecg" not in cols or "eda" not in cols or "temp" not in cols:
+        raise ValueError("Expected physiology columns ecg, eda, temp for WESAD feature extraction.")
 
-    last_vals = x[:, -1, :]
-    feats.append(last_vals)
-    names += [f"{f}_last" for f in feature_names]
+    ecg_idx = cols.index("ecg")
+    eda_idx = cols.index("eda")
+    temp_idx = cols.index("temp")
+    dist_idx = cols.index("distance_to_robot") if "distance_to_robot" in cols else None
+    speed_idx = cols.index("robot_speed") if "robot_speed" in cols else None
+    resp_idx = cols.index("resp") if "resp" in cols else None
+    accel_idx = cols.index("accel") if "accel" in cols else None
 
-    mean_vals = x.mean(axis=1)
-    feats.append(mean_vals)
-    names += [f"{f}_mean" for f in feature_names]
-
-    std_vals = x.std(axis=1)
-    feats.append(std_vals)
-    names += [f"{f}_std" for f in feature_names]
-
-    min_vals = x.min(axis=1)
-    feats.append(min_vals)
-    names += [f"{f}_min" for f in feature_names]
-
-    max_vals = x.max(axis=1)
-    feats.append(max_vals)
-    names += [f"{f}_max" for f in feature_names]
-
-    # slope via simple linear regression against time index
-    time_idx = np.arange(length).reshape(1, -1, 1)
-    time_mean = time_idx.mean()
-    denom = ((time_idx - time_mean) ** 2).sum()
-    slope = ((time_idx - time_mean) * (x - x.mean(axis=1, keepdims=True))).sum(axis=1) / denom
-    feats.append(slope)
-    names += [f"{f}_slope" for f in feature_names]
-
-    feature_matrix = np.concatenate(feats, axis=1).astype(np.float32)
-    return feature_matrix, names
-
-
-def add_ttc_features(
-    feature_matrix: np.ndarray,
-    feature_names: list[str],
-    windows: np.ndarray,
-    feature_cols: Sequence[str],
-) -> tuple[np.ndarray, list[str]]:
-    if "distance_to_robot" not in feature_cols or "robot_speed" not in feature_cols:
-        return feature_matrix, feature_names
-    dist_idx = feature_cols.index("distance_to_robot")
-    speed_idx = feature_cols.index("robot_speed")
-    dist_last = windows[:, -1, dist_idx]
-    speed_last = windows[:, -1, speed_idx]
-    ttc = dist_last / np.clip(speed_last, 1e-3, None)
-    feature_matrix = np.concatenate([feature_matrix, ttc.reshape(-1, 1)], axis=1)
-    feature_names = feature_names + ["time_to_collision"]
-    return feature_matrix, feature_names
+    rows: list[list[float]] = []
+    names: list[str] | None = None
+    for window in windows:
+        signal_feats = extract_window_features(
+            ecg_window=window[:, ecg_idx],
+            eda_window=window[:, eda_idx],
+            temp_window=window[:, temp_idx],
+            sampling_rate_hz=sampling_rate_hz,
+            include_freq_domain=include_freq_domain,
+            scr_threshold=scr_threshold,
+            min_scr_distance=min_scr_distance,
+        )
+        if dist_idx is not None and speed_idx is not None:
+            dist = float(window[-1, dist_idx])
+            speed = float(window[-1, speed_idx])
+            signal_feats["ttc_proxy"] = dist / max(speed, 1e-3)
+        signal_feats["distance_last"] = float(window[-1, dist_idx]) if dist_idx is not None else 0.0
+        signal_feats["speed_last"] = float(window[-1, speed_idx]) if speed_idx is not None else 0.0
+        if resp_idx is not None:
+            signal_feats["resp_mean"] = float(np.mean(window[:, resp_idx]))
+            signal_feats["resp_std"] = float(np.std(window[:, resp_idx]))
+        if accel_idx is not None:
+            signal_feats["accel_mean"] = float(np.mean(window[:, accel_idx]))
+            signal_feats["accel_std"] = float(np.std(window[:, accel_idx]))
+        if names is None:
+            names = list(signal_feats.keys())
+        rows.append([signal_feats[k] for k in names])
+    return np.array(rows, dtype=np.float32), (names or [])

@@ -14,11 +14,17 @@ def plot_roc(y_true: np.ndarray, y_prob: np.ndarray | list[tuple[str, np.ndarray
     plt.figure()
     if isinstance(y_prob, list):
         for name, probs in y_prob:
-            fpr, tpr, _ = roc_curve(y_true, probs)
-            plt.plot(fpr, tpr, label=name)
+            try:
+                fpr, tpr, _ = roc_curve(y_true, probs)
+                plt.plot(fpr, tpr, label=name)
+            except Exception:
+                continue
     else:
-        fpr, tpr, _ = roc_curve(y_true, y_prob)
-        plt.plot(fpr, tpr, label=label)
+        try:
+            fpr, tpr, _ = roc_curve(y_true, y_prob)
+            plt.plot(fpr, tpr, label=label)
+        except Exception:
+            pass
     plt.plot([0, 1], [0, 1], "k--", alpha=0.5)
     plt.xlabel("False Positive Rate")
     plt.ylabel("True Positive Rate")
@@ -33,11 +39,17 @@ def plot_pr(y_true: np.ndarray, y_prob: np.ndarray | list[tuple[str, np.ndarray]
     plt.figure()
     if isinstance(y_prob, list):
         for name, probs in y_prob:
-            precision, recall, _ = precision_recall_curve(y_true, probs)
-            plt.plot(recall, precision, label=name)
+            try:
+                precision, recall, _ = precision_recall_curve(y_true, probs)
+                plt.plot(recall, precision, label=name)
+            except Exception:
+                continue
     else:
-        precision, recall, _ = precision_recall_curve(y_true, y_prob)
-        plt.plot(recall, precision, label=label)
+        try:
+            precision, recall, _ = precision_recall_curve(y_true, y_prob)
+            plt.plot(recall, precision, label=label)
+        except Exception:
+            pass
     plt.xlabel("Recall")
     plt.ylabel("Precision")
     plt.title("Precision-Recall Curve")

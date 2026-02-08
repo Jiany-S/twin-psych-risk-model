@@ -4,16 +4,18 @@ paths:
   run_root: experiments/runs
 
 dataset:
-  name: synthetic   # wesad | synthetic | csv
-  path: data/raw
-  format: auto      # auto | wesad_pickle | csv
+  name: wesad
+  report_name: WESAD pilot (8 subjects)
+  path: data/raw/wesad_subset
+  format: auto
+  subjects: ["S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"]
 
 reproducibility:
   seed: 42
 
 targets:
   multi_head:
-    enabled: true
+    enabled: false
   stress:
     label_col: y_stress
   comfort:
@@ -25,6 +27,10 @@ task:
   sampling_rate_hz: 4.0
 
 split:
+  mode: subject_holdout
+  train_subjects: ["S2", "S3", "S4", "S5", "S6"]
+  val_subjects: ["S7"]
+  test_subjects: ["S8", "S9"]
   train_ratio: 0.7
   val_ratio: 0.15
   test_ratio: 0.15
@@ -51,31 +57,27 @@ features:
     specialization_col: specialization_index
     experience_col: experience_level
   hrv:
-    include_freq_domain: true
+    include_freq_domain: false
   eda:
     scr_threshold: 0.05
     min_scr_distance: 3
 
-synthetic:
-  enabled_if_missing: true
-  use_existing_raw: false
-  num_workers: 6
-  num_timesteps: 280
-  missing_rate: 0.02
-  seed: 123
+models:
+  run_xgb: true
+  run_tft: true
 
 xgboost:
   max_depth: 4
-  n_estimators: 200
+  n_estimators: 150
   learning_rate: 0.05
   subsample: 0.9
   colsample_bytree: 0.9
   early_stopping_rounds: 20
-  calibration: isotonic   # isotonic | platt | none
+  calibration: isotonic
 
 tft:
   strategy: multi_model
-  max_epochs: 3
+  max_epochs: 10
   hidden_size: 24
   lstm_layers: 1
   dropout: 0.1
@@ -84,7 +86,7 @@ tft:
   gpus: 0
   early_stop_patience: 2
   learning_rate: 1.0e-3
-  tft_loss: quantile  # quantile | bce
+  tft_loss: quantile
 
 report:
   top_k_features: 15

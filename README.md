@@ -1,57 +1,82 @@
-# Risk Forecasting with XGBoost + TFT
+# Twin Psych Risk Model: XGBoost vs TFT
 
-This repository trains and compares two short-horizon risk forecasting models on multimodal time-series:
-1) XGBoost baseline with engineered window features
-2) Temporal Fusion Transformer (TFT) using PyTorch Forecasting
+This repo trains and compares XGBoost and Temporal Fusion Transformer (TFT) for short-horizon risk forecasting from multimodal time-series, with leak-safe worker personalization.
 
-The pipeline runs end-to-end with a single command and automatically generates a realistic synthetic dataset if raw data is missing.
-
-## One-command run
+## Run
 ```bash
 python -m src.run_experiment --config src/config/default.yaml
 ```
 
-Artifacts are saved under `experiments/runs/<timestamp>/` including metrics, plots, models, processed data, and a markdown report.
+Artifacts are saved under `experiments/runs/<timestamp>/`:
+- `metrics.json`
+- `results.md`
+- `config_resolved.yaml`
+- `models/*`
+- `plots/*.png`
+- `processed/windows_*.npy`, `processed/meta.csv`, `processed/splits.csv`, `processed/tft_flat.csv`
 
-## Data schema
-Place a single CSV at `data/raw/data.csv` or multiple CSVs under `data/raw/`. Minimum columns:
-- `time_idx` (int, increasing per worker)
-- `worker_id` (str/int)
-- `target` (0/1 or float in [0,1])
-- `hr`, `hrv_rmssd`, `gsr`
-- `distance_to_robot`, `robot_speed`
+## Datasets
+Configured via `dataset` in `src/config/default.yaml`.
+- `dataset.name: wesad | synthetic | csv`
+- `dataset.path`: local path to dataset root/file
+- `dataset.format: auto | wesad_pickle | csv`
 
-Optional columns (auto-filled if missing):
-- `hazard_zone` (int/cat, default 0)
-- `task_phase` (cat, default "default")
+WESAD loader supports:
+- native `S*/S*.pkl`
+- CSV exports
 
-If raw data is absent, synthetic data is generated and stored under `data/raw/`.
+Unified columns include:
+- `timestamp`, `time_idx`, `worker_id`
+- `ecg`, `eda`, `temp` (optional `resp`)
+- `distance_to_robot`, `robot_speed`, `hazard_zone`, `task_phase`
+- `protocol_label`, `y_stress`, `y_comfort_proxy`
 
-## Worker profiles
-Per-worker baseline stats (mu/sigma) are tracked using EMA and used by both models. Baselines are fit on the **train split only** to avoid leakage, then applied to val/test.
-Static features:
+## Targets
+- Stress classification: `y_stress`
+- Comfort regression proxy: `y_comfort_proxy`
+
+Default is multi-head enabled (both tasks in one run).
+
+## Leakage-safe profiles
+Worker EMA baselines are fit on **train split only**:
+1. split chronologically per worker
+2. fit profiles on train only
+3. transform train/val/test using train-fitted profiles
+
+You can disable profile features using:
+```yaml
+profiles:
+  enabled: false
 ```
-experience_level (binned), specialization_id,
-mu_hr, sigma_hr, mu_hrv, sigma_hrv, mu_gsr, sigma_gsr
+
+## Window and horizon controls
+```yaml
+task:
+  window_length: 60
+  horizon_steps: 5
+  sampling_rate_hz: 4.0
 ```
-
-Profiles are used as:
-- TFT static covariates (categorical + real)
-- XGBoost features appended to window-engineered features
-
-## Switching classification vs regression
-In `src/config/default.yaml` set:
-- `task.task_type: classification` or `regression`
-- `task.risk_threshold` (for binarizing continuous targets when classification)
-- `task.horizon_steps` / `task.window_length` to control forecasting horizon and encoder length
-
-## Outputs
-`experiments/runs/<timestamp>/`
-- `metrics.json` (per-model metrics + comparison)
-- `results.md` (summary report)
-- `plots/*.png` (ROC, PR, calibration, confusion matrix, time-series, feature importance)
-- model artifacts (XGBoost model, TFT checkpoint)
 
 ## Notes
-- The default config is CPU-friendly and finishes quickly on a synthetic dataset.
-- All splits are chronological within each worker to avoid leakage.
+- Run is CPU-friendly by default (`tft.max_epochs: 3` + early stopping).
+- If one model fails, the run still completes and records the error in `metrics.json`.
+
+## WESAD pilot (8 subjects)
+Prepare a local 8-subject subset from Kaggle-hosted WESAD:
+```bash
+python scripts/prepare_wesad_subset.py --subjects "S2,S3,S4,S5,S6,S7,S8,S9"
+```
+
+Run pilot with profiles enabled:
+```bash
+python -m src.run_experiment --config src/config/wesad_pilot_8subj.yaml
+```
+
+Run pilot with profiles disabled:
+```bash
+python -m src.run_experiment --config src/config/wesad_pilot_8subj_no_profiles.yaml
+```
+
+Convenience scripts:
+- `scripts/run_wesad_pilot.sh`
+- `scripts/run_wesad_pilot.bat`

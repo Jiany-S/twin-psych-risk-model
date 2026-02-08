@@ -48,11 +48,17 @@ def optimal_threshold(y_true: np.ndarray, probs: np.ndarray, mode: str = "youden
 def classification_metrics(y_true: np.ndarray, probs: np.ndarray) -> dict[str, Any]:
     probs = np.clip(probs, 1e-6, 1 - 1e-6)
     y_pred = probs >= 0.5
-    auc = roc_auc_score(y_true, probs)
+    try:
+        auc = roc_auc_score(y_true, probs)
+    except Exception:
+        auc = float("nan")
     auprc = average_precision_score(y_true, probs)
     brier = brier_score_loss(y_true, probs)
     ece = expected_calibration_error(probs, y_true, bins=15)
-    optimal_thr = optimal_threshold(y_true, probs, mode="youden")
+    try:
+        optimal_thr = optimal_threshold(y_true, probs, mode="youden")
+    except Exception:
+        optimal_thr = 0.5
     optimal_pred = probs >= optimal_thr
 
     return {
@@ -72,6 +78,9 @@ def classification_metrics(y_true: np.ndarray, probs: np.ndarray) -> dict[str, A
 
 def regression_metrics(y_true: np.ndarray, preds: np.ndarray) -> dict[str, Any]:
     mae = mean_absolute_error(y_true, preds)
-    rmse = mean_squared_error(y_true, preds, squared=False)
+    rmse = float(np.sqrt(mean_squared_error(y_true, preds)))
     r2 = r2_score(y_true, preds)
-    return {"mae": float(mae), "rmse": float(rmse), "r2": float(r2)}
+    corr = float(np.corrcoef(y_true, preds)[0, 1]) if len(y_true) > 1 else 0.0
+    if np.isnan(corr):
+        corr = 0.0
+    return {"mae": float(mae), "rmse": rmse, "r2": float(r2), "correlation": corr}

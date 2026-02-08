@@ -1,4 +1,4 @@
-"""Run end-to-end experiment: data, preprocessing, XGBoost, TFT, evaluation, plots."""
+"""Run end-to-end experiment: WESAD/synthetic -> features -> XGBoost/TFT -> artifacts."""
 
 from __future__ import annotations
 
@@ -9,13 +9,18 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import yaml
 
 from .data.loader import load_or_generate
 from .data.preprocess import preprocess_dataframe
 from .data.schema import DataSchema
-from .data.windowing import build_windows, create_time_splits
+from .data.windowing import (
+    build_windows,
+    create_subject_holdout_splits,
+    create_time_splits,
+    engineer_window_features,
+)
 from .profiles.worker_profile import WorkerProfileStore
-from .training.metrics import classification_metrics, regression_metrics
 from .training.plotting import (
     plot_calibration,
     plot_confusion_matrix,
@@ -24,8 +29,8 @@ from .training.plotting import (
     plot_roc,
     plot_timeseries,
 )
-from .training.tft_train import train_tft_pipeline
-from .training.xgb_train import train_xgb_pipeline
+from .training.tft_train import train_tft_task
+from .training.xgb_train import train_xgb_tasks
 from .utils.io import load_yaml, save_json
 from .utils.logging import setup_logger
 from .utils.paths import create_run_dir
@@ -38,114 +43,170 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _prepare_flat_for_tft(frame: pd.DataFrame, profiles: WorkerProfileStore, schema: DataSchema) -> pd.DataFrame:
-    static = profiles.get_static_profile_table()
-    flat = frame.merge(static, on="worker_id", how="left")
-    if "specialization_id" not in flat.columns:
-        flat["specialization_id"] = 0
-    if "experience_level" not in flat.columns:
-        flat["experience_level"] = 1
-    flat["specialization_id"] = flat["specialization_id"].fillna(0).astype(int)
-    flat["experience_level"] = flat["experience_level"].fillna(1).astype(int)
+def _assert_chronological(train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame, schema: DataSchema) -> None:
+    for worker_id in train_df[schema.worker_id].unique():
+        tr = train_df[train_df[schema.worker_id] == worker_id][schema.time_idx]
+        va = val_df[val_df[schema.worker_id] == worker_id][schema.time_idx]
+        te = test_df[test_df[schema.worker_id] == worker_id][schema.time_idx]
+        if len(tr) and len(va) and int(va.min()) <= int(tr.max()):
+            raise ValueError(f"Chronological split violated for worker {worker_id}: val <= train.")
+        if len(va) and len(te) and int(te.min()) <= int(va.max()):
+            raise ValueError(f"Chronological split violated for worker {worker_id}: test <= val.")
+
+
+def _assert_disjoint_subjects(train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame, schema: DataSchema) -> None:
+    train_ids = set(train_df[schema.worker_id].astype(str).unique())
+    val_ids = set(val_df[schema.worker_id].astype(str).unique())
+    test_ids = set(test_df[schema.worker_id].astype(str).unique())
+    if train_ids & val_ids or train_ids & test_ids or val_ids & test_ids:
+        raise ValueError("Subject sets overlap across train/val/test.")
+
+
+def _impute_raw_split(split_df: pd.DataFrame, schema: DataSchema) -> pd.DataFrame:
+    frame = split_df.copy()
+    cols = list(schema.physiology) + list(schema.robot_context)
+    for optional_signal in ("resp", "accel"):
+        if optional_signal in frame.columns:
+            cols.append(optional_signal)
+    for col in cols:
+        if col not in frame.columns:
+            frame[col] = 0.0
+        frame[col] = frame.groupby(schema.worker_id)[col].ffill().bfill().fillna(0.0)
+    frame[schema.hazard_zone] = frame[schema.hazard_zone].fillna(0).astype(int)
+    frame[schema.task_phase] = frame[schema.task_phase].fillna("default")
+    return frame
+
+
+def _profile_transform(
+    train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame, schema: DataSchema, cfg: dict[str, Any]
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    profiles_cfg = cfg.get("profiles", {})
+    enabled = bool(profiles_cfg.get("enabled", True))
+    if not enabled:
+        empty_static = pd.DataFrame(columns=["worker_id", "specialization_index", "experience_level"])
+        return train_df, val_df, test_df, empty_static
+
+    profile_store = WorkerProfileStore(schema.physiology)
+    profile_store.fit_baselines(
+        train_df,
+        alpha=float(cfg.get("profile", {}).get("ema_alpha", 0.1)),
+        safe_col=cfg.get("profile", {}).get("safe_col"),
+        worker_col=schema.worker_id,
+    )
+    # Leak-safe transform: train-fitted profiles are reused for val/test only.
+    train_z = profile_store.transform_zscore(train_df, worker_col=schema.worker_id)
+    val_z = profile_store.transform_zscore(val_df, worker_col=schema.worker_id)
+    test_z = profile_store.transform_zscore(test_df, worker_col=schema.worker_id)
+    static = profile_store.get_static_profile_table().rename(columns={"specialization_id": "specialization_index"})
+    return train_z, val_z, test_z, static
+
+
+def _attach_static(df: pd.DataFrame, static: pd.DataFrame, schema: DataSchema) -> pd.DataFrame:
+    frame = df.copy()
+    if not static.empty:
+        frame = frame.merge(static, on="worker_id", how="left")
+    if "specialization_index" not in frame.columns:
+        if schema.specialization_col in frame.columns:
+            frame["specialization_index"] = frame[schema.specialization_col]
+        else:
+            frame["specialization_index"] = frame[schema.worker_id].astype(str).map(lambda x: abs(hash(x)) % 5)
+    if "experience_level" not in frame.columns:
+        if schema.experience_col in frame.columns:
+            frame["experience_level"] = frame[schema.experience_col]
+        else:
+            frame["experience_level"] = frame[schema.worker_id].astype(str).map(lambda x: 1 + abs(hash(x)) % 5)
+    frame["specialization_index"] = frame["specialization_index"].fillna(0).astype(int)
+    frame["experience_level"] = frame["experience_level"].fillna(1).astype(int)
     for col in schema.physiology:
         mu_col = f"baseline_mu_{col}"
         sigma_col = f"baseline_sigma_{col}"
-        if mu_col not in flat.columns:
-            flat[mu_col] = 0.0
-        if sigma_col not in flat.columns:
-            flat[sigma_col] = 1.0
-        flat[mu_col] = flat[mu_col].fillna(0.0)
-        flat[sigma_col] = flat[sigma_col].fillna(1.0)
-    return flat
+        if mu_col not in frame.columns:
+            frame[mu_col] = 0.0
+        if sigma_col not in frame.columns:
+            frame[sigma_col] = 1.0
+        frame[mu_col] = frame[mu_col].fillna(0.0)
+        frame[sigma_col] = frame[sigma_col].fillna(1.0)
+    return frame
 
 
-def _save_processed(processed_dir: Path, windows: np.ndarray, labels: np.ndarray, meta: pd.DataFrame, flat: pd.DataFrame) -> None:
+def _save_processed(run_dir: Path, train_w, val_w, test_w, split_manifest: pd.DataFrame, flat_df: pd.DataFrame) -> None:
+    processed_dir = run_dir / "processed"
     processed_dir.mkdir(parents=True, exist_ok=True)
-    np.save(processed_dir / "windows_X.npy", windows)
-    np.save(processed_dir / "windows_y.npy", labels)
+    windows_all = np.concatenate([train_w.X_windows, val_w.X_windows, test_w.X_windows], axis=0)
+    y_stress = np.concatenate([train_w.y_stress, val_w.y_stress, test_w.y_stress], axis=0)
+    y_comfort = np.concatenate([train_w.y_comfort, val_w.y_comfort, test_w.y_comfort], axis=0)
+    meta = pd.concat(
+        [
+            train_w.meta.assign(split="train"),
+            val_w.meta.assign(split="val"),
+            test_w.meta.assign(split="test"),
+        ],
+        ignore_index=True,
+    )
+    np.save(processed_dir / "windows_X.npy", windows_all)
+    np.save(processed_dir / "windows_y_stress.npy", y_stress)
+    np.save(processed_dir / "windows_y_comfort.npy", y_comfort)
     meta.to_csv(processed_dir / "meta.csv", index=False)
-    flat.to_csv(processed_dir / "tft_flat.csv", index=False)
+    split_manifest.to_csv(processed_dir / "splits.csv", index=False)
+    split_manifest.to_csv(run_dir / "splits.csv", index=False)
+    flat_df.to_csv(processed_dir / "tft_flat.csv", index=False)
 
 
-def _impute_missing(frame: pd.DataFrame, schema: DataSchema) -> pd.DataFrame:
-    filled = frame.copy()
-    for col in list(schema.physiology) + list(schema.robot_context):
-        filled[col] = filled.groupby(schema.worker_id)[col].ffill().bfill()
-        filled[col] = filled[col].fillna(0.0)
-    filled[schema.hazard_zone] = filled[schema.hazard_zone].fillna(0)
-    filled[schema.task_phase] = filled[schema.task_phase].fillna("default")
-    return filled
+def _comparison(metrics: dict[str, Any], include_comfort: bool) -> dict[str, Any]:
+    def get(path: tuple[str, ...], default=None):
+        ptr = metrics
+        for key in path:
+            if not isinstance(ptr, dict) or key not in ptr:
+                return default
+            ptr = ptr[key]
+        return ptr
+
+    result = {
+        "stress_winner_by_auroc": "xgboost"
+        if (get(("xgboost", "stress", "auroc"), -1) >= get(("tft", "stress", "auroc"), -1))
+        else "tft",
+        "delta_stress_auroc": float(get(("tft", "stress", "auroc"), np.nan) - get(("xgboost", "stress", "auroc"), np.nan)),
+    }
+    if include_comfort:
+        result["comfort_winner_by_rmse"] = (
+            "xgboost" if (get(("xgboost", "comfort", "rmse"), 1e9) <= get(("tft", "comfort", "rmse"), 1e9)) else "tft"
+        )
+        result["delta_comfort_rmse"] = float(
+            get(("tft", "comfort", "rmse"), np.nan) - get(("xgboost", "comfort", "rmse"), np.nan)
+        )
+    return result
 
 
-def _assert_no_nan(features: np.ndarray, name: str) -> None:
-    if np.isnan(features).any():
-        raise ValueError(f"NaNs detected in engineered features for {name}. Check preprocessing.")
-
-
-def _assert_chronological_splits(train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame, schema: DataSchema) -> None:
-    for worker_id, worker_df in train_df.groupby(schema.worker_id):
-        train_max = worker_df[schema.time_idx].max()
-        val_min = val_df[val_df[schema.worker_id] == worker_id][schema.time_idx].min()
-        test_min = test_df[test_df[schema.worker_id] == worker_id][schema.time_idx].min()
-        if pd.notna(val_min) and val_min <= train_max:
-            raise ValueError(f"Validation split leaks for worker {worker_id}.")
-        if pd.notna(test_min) and test_min <= train_max:
-            raise ValueError(f"Test split leaks for worker {worker_id}.")
-
-
-def _assert_profiles_fit_on_train(
-    train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame, schema: DataSchema
+def _write_results_md(
+    run_dir: Path,
+    metrics: dict[str, Any],
+    ablation: dict[str, Any],
+    dataset_name: str,
+    split_desc: str,
+    profiles_enabled: bool,
 ) -> None:
-    # Ensure baseline stats are only present in train-derived profiles by checking columns exist post-merge.
-    required_cols = [f"baseline_mu_{f}" for f in schema.physiology] + [f"baseline_sigma_{f}" for f in schema.physiology]
-    for df_name, df in [("train", train_df), ("val", val_df), ("test", test_df)]:
-        missing = [c for c in required_cols if c not in df.columns]
-        if missing:
-            raise ValueError(f"Missing baseline columns in {df_name} split: {missing}")
-
-
-def _comparison_summary(metrics: dict[str, Any], task_type: str) -> dict[str, Any]:
-    if task_type == "classification":
-        xgb_auc = metrics.get("xgboost", {}).get("auroc")
-        tft_auc = metrics.get("tft", {}).get("auroc")
-        winner = "xgboost" if xgb_auc is not None and tft_auc is not None and xgb_auc >= tft_auc else "tft"
-        delta_auc = None if xgb_auc is None or tft_auc is None else float(tft_auc - xgb_auc)
-        delta_auprc = None
-        if metrics.get("xgboost", {}).get("auprc") is not None and metrics.get("tft", {}).get("auprc") is not None:
-            delta_auprc = float(metrics["tft"]["auprc"] - metrics["xgboost"]["auprc"])
-        return {
-            "winner_by_auroc": winner,
-            "delta_auroc": delta_auc,
-            "delta_auprc": delta_auprc,
-            "notes": "Winner chosen by AUROC on the test split.",
-        }
-    xgb_rmse = metrics.get("xgboost", {}).get("rmse")
-    tft_rmse = metrics.get("tft", {}).get("rmse")
-    winner = "xgboost" if xgb_rmse is not None and tft_rmse is not None and xgb_rmse <= tft_rmse else "tft"
-    delta_rmse = None if xgb_rmse is None or tft_rmse is None else float(tft_rmse - xgb_rmse)
-    return {"winner_by_rmse": winner, "delta_rmse": delta_rmse, "notes": "Winner chosen by RMSE."}
-
-
-def _write_report(run_dir: Path, metrics: dict[str, Any]) -> None:
-    tft_note = ""
-    cfg = metrics.get("config", {})
-    if cfg.get("task", {}).get("task_type") == "classification":
-        loss_mode = cfg.get("tft", {}).get("tft_loss", "quantile")
-        tft_note = f"TFT loss mode: {loss_mode}. Predictions are treated as probabilities (clipped to [0,1])."
     lines = [
         "# Experiment Results",
         "",
-        "## Summary",
-        json.dumps(metrics.get("comparison", {}), indent=2),
+        "## Setup",
+        f"- Dataset: {dataset_name}",
+        f"- Split: {split_desc}",
+        f"- Profiles enabled: {profiles_enabled}",
         "",
-        "## TFT Note",
-        tft_note,
+        "## Key Findings",
+        "- No-leakage profile fitting: baselines fit on train split only and reused on val/test.",
+        f"- Stress AUROC winner: {metrics.get('comparison', {}).get('stress_winner_by_auroc', 'n/a')}",
+        f"- Comfort RMSE winner: {metrics.get('comparison', {}).get('comfort_winner_by_rmse', 'n/a')}",
         "",
-        "## XGBoost Metrics",
-        json.dumps(metrics.get("xgboost", {}), indent=2),
+        "## Metrics JSON Snapshot",
+        "```json",
+        json.dumps({k: v for k, v in metrics.items() if k != "config"}, indent=2),
+        "```",
         "",
-        "## TFT Metrics",
-        json.dumps(metrics.get("tft", {}), indent=2),
+        "## Ablation (Profiles ON vs OFF)",
+        "```json",
+        json.dumps(ablation, indent=2),
+        "```",
     ]
     (run_dir / "results.md").write_text("\n".join(lines), encoding="utf-8")
 
@@ -153,204 +214,238 @@ def _write_report(run_dir: Path, metrics: dict[str, Any]) -> None:
 def run_experiment(config_path: str) -> Path:
     cfg = load_yaml(config_path)
     logger = setup_logger()
-    seed_everything(int(cfg["split"]["seed"]))
-
+    seed_everything(int(cfg.get("reproducibility", {}).get("seed", cfg["split"]["seed"])))
     schema = DataSchema.from_config(cfg)
+
     raw_df = load_or_generate(cfg, schema)
     frame = preprocess_dataframe(cfg, raw_df, schema)
+    split_mode = str(cfg.get("split", {}).get("mode", "time")).lower()
+    split_desc = "time-per-worker"
+    if split_mode == "subject_holdout":
+        subjects_cfg = cfg.get("dataset", {}).get("subjects", [])
+        if not subjects_cfg:
+            raise ValueError("split.mode=subject_holdout requires dataset.subjects list.")
+        subjects = [str(s) for s in subjects_cfg]
+        split_cfg = cfg.get("split", {})
+        train_subjects = [str(s) for s in split_cfg.get("train_subjects", subjects[:5])]
+        val_subjects = [str(s) for s in split_cfg.get("val_subjects", subjects[5:6])]
+        test_subjects = [str(s) for s in split_cfg.get("test_subjects", subjects[6:8])]
+        train_df, val_df, test_df, split_manifest = create_subject_holdout_splits(
+            frame, schema, train_subjects, val_subjects, test_subjects
+        )
+        _assert_disjoint_subjects(train_df, val_df, test_df, schema)
+        split_desc = f"subject-holdout train={train_subjects}, val={val_subjects}, test={test_subjects}"
+    else:
+        train_df, val_df, test_df, split_manifest = create_time_splits(
+            frame, schema, cfg["split"]["train_ratio"], cfg["split"]["val_ratio"], cfg["split"]["test_ratio"]
+        )
+        _assert_chronological(train_df, val_df, test_df, schema)
 
-    task_type = cfg["task"]["task_type"]
-    risk_threshold = float(cfg["task"]["risk_threshold"])
-    if task_type == "classification":
-        frame[schema.target] = (frame[schema.target] >= risk_threshold).astype(float)
+    train_df = _impute_raw_split(train_df, schema)
+    val_df = _impute_raw_split(val_df, schema)
+    test_df = _impute_raw_split(test_df, schema)
 
-    train_df, val_df, test_df = create_time_splits(
-        frame,
-        schema,
-        train_ratio=cfg["split"]["train_ratio"],
-        val_ratio=cfg["split"]["val_ratio"],
-        test_ratio=cfg["split"]["test_ratio"],
-    )
-    _assert_chronological_splits(train_df, val_df, test_df, schema)
+    train_df, val_df, test_df, static_profiles = _profile_transform(train_df, val_df, test_df, schema, cfg)
+    train_df = _attach_static(train_df, static_profiles, schema)
+    val_df = _attach_static(val_df, static_profiles, schema)
+    test_df = _attach_static(test_df, static_profiles, schema)
+    flat_df = pd.concat([train_df, val_df, test_df], ignore_index=True)
 
-    # Fit baselines on train only to prevent leakage, then apply z-score to each split separately.
-    profile_cfg = cfg.get("profile", {})
-    profiles = WorkerProfileStore(schema.physiology)
-    profiles.fit_baselines(
-        train_df,
-        alpha=float(profile_cfg.get("ema_alpha", 0.1)),
-        safe_col=profile_cfg.get("safe_col"),
-        worker_col=schema.worker_id,
+    window_length = int(cfg["task"]["window_length"])
+    horizon = int(cfg["task"]["horizon_steps"])
+    min_split_len = min(
+        min(len(part[part[schema.worker_id] == wid]) for wid in part[schema.worker_id].unique())
+        for part in (train_df, val_df, test_df)
     )
-    train_df = _prepare_flat_for_tft(
-        _impute_missing(profiles.transform_zscore(train_df, worker_col=schema.worker_id), schema), profiles, schema
-    )
-    val_df = _prepare_flat_for_tft(
-        _impute_missing(profiles.transform_zscore(val_df, worker_col=schema.worker_id), schema), profiles, schema
-    )
-    test_df = _prepare_flat_for_tft(
-        _impute_missing(profiles.transform_zscore(test_df, worker_col=schema.worker_id), schema), profiles, schema
-    )
-    flat = pd.concat([train_df, val_df, test_df], ignore_index=True)
-    _assert_profiles_fit_on_train(train_df, val_df, test_df, schema)
-
-    # Windowing across splits for XGBoost
-    window_cfg = cfg["task"]
-    window_length = int(window_cfg["window_length"])
-    horizon = int(window_cfg["horizon_steps"])
-    min_len = min(
-        min(len(df[df[schema.worker_id] == wid]) for wid in df[schema.worker_id].unique())
-        for df in [train_df, val_df, test_df]
-    )
-    if min_len <= horizon:
-        raise ValueError("Split sizes too small for the configured horizon.")
-    if min_len <= window_length:
-        adjusted = max(2, min_len - horizon - 1)
-        logger.warning("Reducing window_length from %d to %d due to small split size.", window_length, adjusted)
+    if min_split_len <= horizon:
+        raise ValueError("Split segments are too short for the configured horizon.")
+    if min_split_len <= window_length:
+        adjusted = max(4, min_split_len - horizon - 1)
+        logger.warning("Reducing window_length from %d to %d for available split lengths.", window_length, adjusted)
         window_length = adjusted
-    train_windows = build_windows(train_df, schema, window_length, horizon, task_type, risk_threshold)
-    val_windows = build_windows(val_df, schema, window_length, horizon, task_type, risk_threshold)
-    test_windows = build_windows(test_df, schema, window_length, horizon, task_type, risk_threshold)
-
-    windows_all = np.concatenate([train_windows.X_windows, val_windows.X_windows, test_windows.X_windows], axis=0)
-    labels_all = np.concatenate([train_windows.y, val_windows.y, test_windows.y], axis=0)
-    meta_all = pd.concat(
-        [
-            train_windows.meta.assign(split="train"),
-            val_windows.meta.assign(split="val"),
-            test_windows.meta.assign(split="test"),
-        ],
-        ignore_index=True,
-    )
-    split_indices = {
-        "train": np.arange(len(train_windows.y)),
-        "val": np.arange(len(train_windows.y), len(train_windows.y) + len(val_windows.y)),
-        "test": np.arange(len(train_windows.y) + len(val_windows.y), len(labels_all)),
-    }
+    train_w = build_windows(train_df, schema, window_length, horizon)
+    val_w = build_windows(val_df, schema, window_length, horizon)
+    test_w = build_windows(test_df, schema, window_length, horizon)
 
     run_paths = create_run_dir(cfg["paths"]["run_root"])
-    # Save processed data scoped to run
-    _save_processed(run_paths.data / "processed", windows_all, labels_all, meta_all, flat)
-    # Save resolved config
-    import yaml
-
     (run_paths.root / "config_resolved.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
-    metrics: dict[str, Any] = {"config": cfg}
+    _save_processed(run_paths.root, train_w, val_w, test_w, split_manifest, flat_df)
 
-    # Train XGBoost
+    sampling_rate = float(cfg["task"].get("sampling_rate_hz", 1.0))
+    include_freq = bool(cfg["features"].get("hrv", {}).get("include_freq_domain", True))
+    scr_threshold = float(cfg["features"].get("eda", {}).get("scr_threshold", 0.05))
+    min_scr_distance = int(cfg["features"].get("eda", {}).get("min_scr_distance", 3))
+    X_train, feat_names = engineer_window_features(
+        train_w.X_windows, schema, sampling_rate, include_freq, scr_threshold, min_scr_distance
+    )
+    X_val, _ = engineer_window_features(
+        val_w.X_windows, schema, sampling_rate, include_freq, scr_threshold, min_scr_distance
+    )
+    X_test, _ = engineer_window_features(
+        test_w.X_windows, schema, sampling_rate, include_freq, scr_threshold, min_scr_distance
+    )
+    X_all = np.concatenate([X_train, X_val, X_test], axis=0)
+    y_stress_all = np.concatenate([train_w.y_stress, val_w.y_stress, test_w.y_stress], axis=0)
+    y_comfort_all = np.concatenate([train_w.y_comfort, val_w.y_comfort, test_w.y_comfort], axis=0)
+    meta_all = pd.concat(
+        [train_w.meta.assign(split="train"), val_w.meta.assign(split="val"), test_w.meta.assign(split="test")],
+        ignore_index=True,
+    )
+    split_idx = {
+        "train": np.arange(len(train_w.y_stress)),
+        "val": np.arange(len(train_w.y_stress), len(train_w.y_stress) + len(val_w.y_stress)),
+        "test": np.arange(len(train_w.y_stress) + len(val_w.y_stress), len(y_stress_all)),
+    }
+
+    include_comfort = bool(cfg.get("targets", {}).get("multi_head", {}).get("enabled", True))
+    models_cfg = cfg.get("models", {})
+    run_xgb = bool(models_cfg.get("run_xgb", True))
+    run_tft = bool(models_cfg.get("run_tft", True))
+    metrics: dict[str, Any] = {"config": cfg}
+    xgb_out = None
+    tft_stress = None
+    tft_comfort = None
+
     try:
-        feature_cols = list(schema.physiology) + list(schema.robot_context) + [schema.hazard_zone, schema.task_phase]
-        xgb_artifacts = train_xgb_pipeline(
-            cfg,
-            windows_all,
-            labels_all,
-            meta_all,
-            profiles.get_static_profile_table(),
-            feature_cols,
-            split_indices,
-            task_type,
-            run_paths.root,
+        if not run_xgb:
+            raise RuntimeError("XGBoost disabled by config (models.run_xgb=false).")
+        xgb_out = train_xgb_tasks(
+            cfg=cfg,
+            feature_matrix=X_all,
+            feature_names=feat_names,
+            y_stress=y_stress_all,
+            y_comfort=y_comfort_all,
+            meta=meta_all,
+            static_profiles=static_profiles,
+            split_indices=split_idx,
+            run_dir=run_paths.root,
+            use_profiles=bool(cfg.get("profiles", {}).get("enabled", True)),
+            model_prefix="xgb",
         )
-        metrics["xgboost"] = xgb_artifacts.metrics | {"model_path": str(xgb_artifacts.model_path)}
-        _assert_no_nan(
-            np.concatenate([train_windows.X_windows, val_windows.X_windows, test_windows.X_windows], axis=0),
-            "windowed_inputs",
-        )
+        xgb_metrics = {"stress": xgb_out["stress"].metrics | {"model_path": str(xgb_out["stress"].model_path)}}
+        if include_comfort:
+            xgb_metrics["comfort"] = xgb_out["comfort"].metrics | {"model_path": str(xgb_out["comfort"].model_path)}
+        metrics["xgboost"] = xgb_metrics
         plot_feature_importance(
-            np.array([item["importance"] for item in xgb_artifacts.metrics.get("feature_importance_topk", [])]),
-            [item["feature"] for item in xgb_artifacts.metrics.get("feature_importance_topk", [])],
-            run_paths.plots / "feature_importance_xgb.png",
+            np.array([item["importance"] for item in xgb_out["stress"].feature_importance]),
+            [item["feature"] for item in xgb_out["stress"].feature_importance],
+            run_paths.plots / "feature_importance_xgb_stress.png",
             top_k=cfg["report"]["top_k_features"],
         )
     except Exception as exc:
-        logger.exception("XGBoost training failed: %s", exc)
+        logger.exception("XGBoost pipeline failed: %s", exc)
         metrics["xgboost"] = {"error": str(exc)}
-        xgb_artifacts = None
 
-    # Train TFT
     try:
-        tft_artifacts = train_tft_pipeline(
-            cfg,
-            train_df,
-            val_df,
-            test_df,
-            schema,
-            task_type,
-            run_paths.root,
-            window_length,
-            horizon,
+        if not run_tft:
+            raise RuntimeError("TFT disabled by config (models.run_tft=false).")
+        tft_stress = train_tft_task(
+            cfg=cfg,
+            train_df=train_df.copy(),
+            val_df=val_df.copy(),
+            test_df=test_df.copy(),
+            schema=schema,
+            target_col=schema.stress_target,
+            task_type="classification",
+            run_dir=run_paths.root,
+            window_length=window_length,
+            horizon=horizon,
+            model_name="tft_stress",
+            use_profiles=bool(cfg.get("profiles", {}).get("enabled", True)),
         )
-        metrics["tft"] = tft_artifacts.metrics | {"checkpoint_path": str(tft_artifacts.checkpoint_path)}
+        tft_metrics = {"stress": tft_stress.metrics | {"checkpoint_path": str(tft_stress.checkpoint_path)}}
+        if include_comfort:
+            tft_comfort = train_tft_task(
+                cfg=cfg,
+                train_df=train_df.copy(),
+                val_df=val_df.copy(),
+                test_df=test_df.copy(),
+                schema=schema,
+                target_col=schema.comfort_target,
+                task_type="regression",
+                run_dir=run_paths.root,
+                window_length=window_length,
+                horizon=horizon,
+                model_name="tft_comfort",
+                use_profiles=bool(cfg.get("profiles", {}).get("enabled", True)),
+            )
+            tft_metrics["comfort"] = tft_comfort.metrics | {"checkpoint_path": str(tft_comfort.checkpoint_path)}
+        metrics["tft"] = tft_metrics
     except Exception as exc:
-        logger.exception("TFT training failed: %s", exc)
+        logger.exception("TFT pipeline failed: %s", exc)
         metrics["tft"] = {"error": str(exc)}
-        tft_artifacts = None
 
-    # Plotting and comparison
-    if task_type == "classification":
-        test_labels = labels_all[split_indices["test"]]
-        roc_series = []
-        pr_series = []
-        cal_series = []
-        if xgb_artifacts is not None:
-            roc_series.append(("XGBoost", xgb_artifacts.predictions))
-            pr_series.append(("XGBoost", xgb_artifacts.predictions))
-            cal_series.append(("XGBoost", xgb_artifacts.predictions))
-        if tft_artifacts is not None and len(tft_artifacts.targets) == len(tft_artifacts.predictions):
-            if len(tft_artifacts.targets) == len(test_labels):
-                roc_series.append(("TFT", tft_artifacts.predictions))
-                pr_series.append(("TFT", tft_artifacts.predictions))
-                cal_series.append(("TFT", tft_artifacts.predictions))
+    # Ablation: profiles OFF using XGBoost only for fast comparison.
+    ablation: dict[str, Any] = {}
+    try:
+        off_cfg = json.loads(json.dumps(cfg))
+        off_cfg["profiles"]["enabled"] = False
+        off_xgb = train_xgb_tasks(
+            cfg=off_cfg,
+            feature_matrix=X_all,
+            feature_names=feat_names,
+            y_stress=y_stress_all,
+            y_comfort=y_comfort_all,
+            meta=meta_all,
+            static_profiles=None,
+            split_indices=split_idx,
+            run_dir=run_paths.root,
+            use_profiles=False,
+            model_prefix="xgb_profiles_off",
+        )
+        ablation = {"profiles_on": {"stress_auroc": metrics.get("xgboost", {}).get("stress", {}).get("auroc")}}
+        ablation["profiles_off"] = {"stress_auroc": off_xgb["stress"].metrics.get("auroc")}
+        if include_comfort:
+            ablation["profiles_on"]["comfort_rmse"] = metrics.get("xgboost", {}).get("comfort", {}).get("rmse")
+            ablation["profiles_off"]["comfort_rmse"] = off_xgb["comfort"].metrics.get("rmse")
+    except Exception as exc:
+        ablation = {"error": str(exc)}
 
-        if roc_series:
-            plot_roc(test_labels, roc_series, run_paths.plots / "roc_curve.png")
-            plot_pr(test_labels, pr_series, run_paths.plots / "pr_curve.png")
-            plot_calibration(test_labels, cal_series, run_paths.plots / "calibration_curve.png")
-
-        cm_source = metrics.get("xgboost", {}).get("confusion_matrix_default")
-        if cm_source is None and metrics.get("tft", {}).get("confusion_matrix_default") is not None:
-            cm_source = metrics["tft"]["confusion_matrix_default"]
-        if cm_source is not None:
-            plot_confusion_matrix(np.array(cm_source), run_paths.plots / "confusion_matrix.png")
-
-        if xgb_artifacts is not None:
+    # Plots
+    y_stress_test = y_stress_all[split_idx["test"]]
+    y_comfort_test = y_comfort_all[split_idx["test"]]
+    if xgb_out is not None:
+        plot_roc(y_stress_test, [("XGBoost", xgb_out["stress"].predictions)], run_paths.plots / "roc_curve_stress.png")
+        plot_pr(y_stress_test, [("XGBoost", xgb_out["stress"].predictions)], run_paths.plots / "pr_curve_stress.png")
+        plot_calibration(
+            y_stress_test, [("XGBoost", xgb_out["stress"].predictions)], run_paths.plots / "calibration_stress.png"
+        )
+        cm = np.array(metrics.get("xgboost", {}).get("stress", {}).get("confusion_matrix_default", [[0, 0], [0, 0]]))
+        plot_confusion_matrix(cm, run_paths.plots / "confusion_stress.png")
+        plot_timeseries(
+            meta_all.iloc[split_idx["test"]],
+            y_stress_test,
+            xgb_out["stress"].predictions,
+            run_paths.plots / "timeseries_stress_overlay.png",
+        )
+        if include_comfort:
             plot_timeseries(
-                meta_all.loc[split_indices["test"]],
-                test_labels,
-                xgb_artifacts.predictions,
-                run_paths.plots / "timeseries_predictions.png",
-            )
-        elif tft_artifacts is not None:
-            meta = test_windows.meta.copy()
-            n = min(len(meta), len(tft_artifacts.predictions))
-            plot_timeseries(
-                meta.iloc[:n],
-                test_windows.y[:n],
-                tft_artifacts.predictions[:n],
-                run_paths.plots / "timeseries_predictions.png",
-            )
-    else:
-        if xgb_artifacts is not None:
-            plot_timeseries(
-                meta_all.loc[split_indices["test"]],
-                labels_all[split_indices["test"]],
-                xgb_artifacts.predictions,
-                run_paths.plots / "timeseries_predictions.png",
-            )
-        elif tft_artifacts is not None:
-            meta = test_windows.meta.copy()
-            n = min(len(meta), len(tft_artifacts.predictions))
-            plot_timeseries(
-                meta.iloc[:n],
-                test_windows.y[:n],
-                tft_artifacts.predictions[:n],
-                run_paths.plots / "timeseries_predictions.png",
+                meta_all.iloc[split_idx["test"]],
+                y_comfort_test,
+                xgb_out["comfort"].predictions,
+                run_paths.plots / "timeseries_comfort_overlay.png",
             )
 
-    metrics["comparison"] = _comparison_summary(metrics, task_type)
+    if tft_stress is not None and len(tft_stress.targets) == len(tft_stress.predictions):
+        plot_roc(
+            tft_stress.targets,
+            [("TFT", tft_stress.predictions)],
+            run_paths.plots / "roc_curve_stress_tft.png",
+        )
+
+    metrics["comparison"] = _comparison(metrics, include_comfort=include_comfort)
+    metrics["ablation_profiles"] = ablation
     save_json(metrics, run_paths.root / "metrics.json")
-    _write_report(run_paths.root, metrics)
-
+    _write_results_md(
+        run_paths.root,
+        metrics,
+        ablation,
+        dataset_name=str(
+            cfg.get("dataset", {}).get("report_name", cfg.get("dataset", {}).get("name", "unknown"))
+        ),
+        split_desc=split_desc,
+        profiles_enabled=bool(cfg.get("profiles", {}).get("enabled", True)),
+    )
     logger.info("Experiment complete. Artifacts saved to %s", run_paths.root)
     return run_paths.root
 

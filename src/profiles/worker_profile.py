@@ -69,7 +69,9 @@ class WorkerProfileStore:
         return stats
 
     def _derive_meta(self, df: pd.DataFrame) -> dict[str, int]:
-        if "specialization_id" in df.columns:
+        if "specialization_index" in df.columns:
+            specialization_id = int(df["specialization_index"].iloc[0])
+        elif "specialization_id" in df.columns:
             specialization_id = int(df["specialization_id"].iloc[0])
         else:
             specialization_id = abs(hash(str(df["worker_id"].iloc[0]))) % 5

@@ -22,26 +22,30 @@ def build_tft_datasets(
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
     schema,
+    target_col: str,
     window_length: int,
     horizon: int,
+    use_profiles: bool,
     known_categoricals: Sequence[str] | None = None,
 ) -> tuple[Any, Any]:
     pf = _require_tft()
     TimeSeriesDataSet = pf.TimeSeriesDataSet
 
     min_encoder_length = max(2, window_length // 2)
+    static_reals = []
+    if use_profiles:
+        static_reals = [f"baseline_mu_{f}" for f in schema.physiology] + [f"baseline_sigma_{f}" for f in schema.physiology]
     training = TimeSeriesDataSet(
         train_df,
         time_idx=schema.time_idx,
-        target=schema.target,
+        target=target_col,
         group_ids=[schema.worker_id],
         max_encoder_length=window_length,
         min_encoder_length=min_encoder_length,
         max_prediction_length=horizon,
         min_prediction_length=horizon,
-        static_categoricals=["worker_id", "specialization_id", "experience_level"],
-        static_reals=[f"baseline_mu_{f}" for f in schema.physiology]
-        + [f"baseline_sigma_{f}" for f in schema.physiology],
+        static_categoricals=["worker_id", "specialization_index", "experience_level"],
+        static_reals=static_reals,
         time_varying_known_reals=list(schema.robot_context) + [schema.hazard_zone],
         time_varying_known_categoricals=list(known_categoricals or ["task_phase"]),
         time_varying_unknown_reals=list(schema.physiology),
