@@ -167,6 +167,7 @@ def load_wesad_dataset(
     data_format: str = "auto",
     subjects: list[str] | None = None,
     max_rows_per_subject: int | None = None,
+    downsample_factor: int | None = None,
 ) -> pd.DataFrame:
     """Load WESAD from native pickle folders or CSV exports."""
     path = Path(dataset_path)
@@ -183,6 +184,8 @@ def load_wesad_dataset(
             subject_df = _load_wesad_subject_pickle(pkl_path, schema)
             if max_rows_per_subject and max_rows_per_subject > 0:
                 subject_df = subject_df.iloc[:max_rows_per_subject].copy()
+            if downsample_factor and downsample_factor > 1:
+                subject_df = subject_df.iloc[::downsample_factor].copy()
             frames.append(subject_df)
         if not frames:
             raise FileNotFoundError(f"No valid WESAD subject pickle files found under {path}")
@@ -194,6 +197,13 @@ def load_wesad_dataset(
                 df.sort_values([schema.worker_id, schema.time_idx])
                 .groupby(schema.worker_id, observed=True)
                 .head(max_rows_per_subject)
+                .reset_index(drop=True)
+            )
+        if downsample_factor and downsample_factor > 1:
+            df = (
+                df.sort_values([schema.worker_id, schema.time_idx])
+                .groupby(schema.worker_id, observed=True)
+                .apply(lambda g: g.iloc[::downsample_factor])
                 .reset_index(drop=True)
             )
     else:

@@ -10,6 +10,7 @@ dataset:
   format: auto
   subjects: ["S2"]
   max_rows_per_subject: 20000
+  downsample_factor: 5
 
 reproducibility:
   seed: 42
@@ -26,6 +27,7 @@ task:
   horizon_steps: 3
   window_length: 30
   sampling_rate_hz: 4.0
+  window_step: 2
 
 split:
   mode: time

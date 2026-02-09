@@ -119,6 +119,7 @@ def build_windows(
     schema: DataSchema,
     window_length: int,
     horizon_steps: int,
+    window_step: int = 1,
 ) -> WindowedData:
     feature_cols = list(schema.physiology) + list(schema.robot_context)
     for optional_signal in ("resp", "accel"):
@@ -131,13 +132,13 @@ def build_windows(
     y_stress: list[float] = []
     y_comfort: list[float] = []
     metas: list[dict[str, Any]] = []
-    for worker_id, worker_df in df.groupby(schema.worker_id):
+    for worker_id, worker_df in df.groupby(schema.worker_id, observed=True):
         worker_df = worker_df.sort_values(schema.time_idx).reset_index(drop=True)
-        values = worker_df[feature_cols].to_numpy(dtype=float)
+        values = worker_df[feature_cols].to_numpy(dtype=np.float32, copy=False)
         stress = worker_df[schema.stress_target].to_numpy(dtype=float)
         comfort = worker_df[schema.comfort_target].to_numpy(dtype=float)
         times = worker_df[schema.time_idx].to_numpy(dtype=int)
-        for start in range(0, len(worker_df) - window_length - horizon_steps + 1):
+        for start in range(0, len(worker_df) - window_length - horizon_steps + 1, max(1, window_step)):
             end = start + window_length
             label_idx = end + horizon_steps - 1
             windows.append(values[start:end])

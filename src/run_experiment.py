@@ -253,6 +253,7 @@ def run_experiment(config_path: str) -> Path:
 
     window_length = int(cfg["task"]["window_length"])
     horizon = int(cfg["task"]["horizon_steps"])
+    window_step = int(cfg.get("task", {}).get("window_step", 1))
     min_split_len = min(
         min(len(part[part[schema.worker_id] == wid]) for wid in part[schema.worker_id].unique())
         for part in (train_df, val_df, test_df)
@@ -263,9 +264,9 @@ def run_experiment(config_path: str) -> Path:
         adjusted = max(4, min_split_len - horizon - 1)
         logger.warning("Reducing window_length from %d to %d for available split lengths.", window_length, adjusted)
         window_length = adjusted
-    train_w = build_windows(train_df, schema, window_length, horizon)
-    val_w = build_windows(val_df, schema, window_length, horizon)
-    test_w = build_windows(test_df, schema, window_length, horizon)
+    train_w = build_windows(train_df, schema, window_length, horizon, window_step=window_step)
+    val_w = build_windows(val_df, schema, window_length, horizon, window_step=window_step)
+    test_w = build_windows(test_df, schema, window_length, horizon, window_step=window_step)
 
     run_paths = create_run_dir(cfg["paths"]["run_root"])
     (run_paths.root / "config_resolved.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
