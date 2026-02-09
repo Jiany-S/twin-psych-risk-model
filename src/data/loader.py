@@ -44,7 +44,15 @@ def load_or_generate(cfg: Mapping[str, object], schema: DataSchema) -> pd.DataFr
             raise FileNotFoundError("dataset.path is required when dataset.name is 'wesad'.")
         subjects = dataset_cfg.get("subjects")
         subject_list = [str(s) for s in subjects] if isinstance(subjects, list) else None
-        return load_wesad_dataset(dataset_path, schema=schema, data_format=dataset_format, subjects=subject_list)
+        max_rows = dataset_cfg.get("max_rows_per_subject")
+        max_rows_per_subject = int(max_rows) if max_rows else None
+        return load_wesad_dataset(
+            dataset_path,
+            schema=schema,
+            data_format=dataset_format,
+            subjects=subject_list,
+            max_rows_per_subject=max_rows_per_subject,
+        )
 
     if dataset_name == "csv":
         if not dataset_path:

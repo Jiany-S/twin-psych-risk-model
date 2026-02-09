@@ -5,10 +5,11 @@ paths:
 
 dataset:
   name: wesad
-  report_name: WESAD (all available subjects)
+  report_name: WESAD tiny (2 subjects)
   path: data/raw/wesad_subset
   format: auto
-  subjects: ["S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11", "S13", "S14", "S15", "S16", "S17"]
+  subjects: ["S2"]
+  max_rows_per_subject: 20000
 
 reproducibility:
   seed: 42
@@ -22,15 +23,12 @@ targets:
     label_col: y_comfort_proxy
 
 task:
-  horizon_steps: 5
-  window_length: 60
+  horizon_steps: 3
+  window_length: 30
   sampling_rate_hz: 4.0
 
 split:
-  mode: subject_holdout
-  train_subjects: ["S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11"]
-  val_subjects: ["S13", "S14"]
-  test_subjects: ["S15", "S16", "S17"]
+  mode: time
   train_ratio: 0.7
   val_ratio: 0.15
   test_ratio: 0.15
@@ -41,7 +39,7 @@ profile:
   safe_col: null
 
 profiles:
-  enabled: false
+  enabled: true
   use_static_meta: true
 
 features:
@@ -67,28 +65,28 @@ models:
   run_tft: true
 
 xgboost:
-  max_depth: 4
-  n_estimators: 150
-  learning_rate: 0.05
+  max_depth: 3
+  n_estimators: 50
+  learning_rate: 0.1
   subsample: 0.9
   colsample_bytree: 0.9
-  early_stopping_rounds: 20
+  early_stopping_rounds: 10
   calibration: isotonic
   tree_method: gpu_hist
   predictor: gpu_predictor
 
 tft:
   strategy: multi_model
-  max_epochs: 10
-  hidden_size: 24
+  max_epochs: 2
+  hidden_size: 16
   lstm_layers: 1
   dropout: 0.1
   batch_size: 64
   num_workers: 0
   gpus: 1
-  early_stop_patience: 2
+  early_stop_patience: 1
   learning_rate: 1.0e-3
   tft_loss: quantile
 
 report:
-  top_k_features: 15
+  top_k_features: 10

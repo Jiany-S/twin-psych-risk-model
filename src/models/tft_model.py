@@ -35,6 +35,13 @@ def build_tft_datasets(
     static_reals = []
     if use_profiles:
         static_reals = [f"baseline_mu_{f}" for f in schema.physiology] + [f"baseline_sigma_{f}" for f in schema.physiology]
+    categorical_encoders = {
+        "worker_id": pf.data.encoders.NaNLabelEncoder(add_nan=True),
+        "specialization_index": pf.data.encoders.NaNLabelEncoder(add_nan=True),
+        "experience_level": pf.data.encoders.NaNLabelEncoder(add_nan=True),
+        "task_phase": pf.data.encoders.NaNLabelEncoder(add_nan=True),
+    }
+
     training = TimeSeriesDataSet(
         train_df,
         time_idx=schema.time_idx,
@@ -52,6 +59,7 @@ def build_tft_datasets(
         add_relative_time_idx=True,
         add_target_scales=False,
         target_normalizer=None,
+        categorical_encoders=categorical_encoders,
     )
     # Validation should be created with predict=False for proper loss/early stopping.
     validation = TimeSeriesDataSet.from_dataset(training, val_df, predict=False, stop_randomization=True)

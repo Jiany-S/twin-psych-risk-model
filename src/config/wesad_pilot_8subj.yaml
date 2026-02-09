@@ -5,10 +5,10 @@ paths:
 
 dataset:
   name: wesad
-  report_name: WESAD pilot (8 subjects)
+  report_name: WESAD (all available subjects)
   path: data/raw/wesad_subset
   format: auto
-  subjects: ["S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"]
+  subjects: ["S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11", "S13", "S14", "S15", "S16", "S17"]
 
 reproducibility:
   seed: 42
@@ -28,9 +28,9 @@ task:
 
 split:
   mode: subject_holdout
-  train_subjects: ["S2", "S3", "S4", "S5", "S6"]
-  val_subjects: ["S7"]
-  test_subjects: ["S8", "S9"]
+  train_subjects: ["S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11"]
+  val_subjects: ["S13", "S14"]
+  test_subjects: ["S15", "S16", "S17"]
   train_ratio: 0.7
   val_ratio: 0.15
   test_ratio: 0.15
@@ -74,6 +74,8 @@ xgboost:
   colsample_bytree: 0.9
   early_stopping_rounds: 20
   calibration: isotonic
+  tree_method: gpu_hist
+  predictor: gpu_predictor
 
 tft:
   strategy: multi_model
@@ -83,7 +85,7 @@ tft:
   dropout: 0.1
   batch_size: 64
   num_workers: 0
-  gpus: 0
+  gpus: 1
   early_stop_patience: 2
   learning_rate: 1.0e-3
   tft_loss: quantile

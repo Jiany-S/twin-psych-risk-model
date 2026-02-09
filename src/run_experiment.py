@@ -71,7 +71,7 @@ def _impute_raw_split(split_df: pd.DataFrame, schema: DataSchema) -> pd.DataFram
     for col in cols:
         if col not in frame.columns:
             frame[col] = 0.0
-        frame[col] = frame.groupby(schema.worker_id)[col].ffill().bfill().fillna(0.0)
+        frame[col] = frame.groupby(schema.worker_id, observed=True)[col].ffill().bfill().fillna(0.0)
     frame[schema.hazard_zone] = frame[schema.hazard_zone].fillna(0).astype(int)
     frame[schema.task_phase] = frame[schema.task_phase].fillna("default")
     return frame

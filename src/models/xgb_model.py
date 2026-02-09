@@ -8,6 +8,15 @@ from typing import Any
 import numpy as np
 
 
+class _ConstantClassifier:
+    def __init__(self, prob: float) -> None:
+        self._prob = float(prob)
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        p = np.full((len(X), 1), self._prob, dtype=float)
+        return np.hstack([1.0 - p, p])
+
+
 def _require_xgboost() -> Any:
     try:
         import xgboost as xgb
@@ -41,8 +50,17 @@ def train_xgboost(
         colsample_bytree=params.get("colsample_bytree", 0.9),
         random_state=42,
     )
+    if "tree_method" in params:
+        common_params["tree_method"] = params.get("tree_method")
+    if "predictor" in params:
+        common_params["predictor"] = params.get("predictor")
 
     if task_type == "classification":
+        unique = np.unique(y_train)
+        if unique.size < 2:
+            # Avoid xgboost failure when only one class is present.
+            prob = float(unique[0]) if unique.size == 1 else 0.5
+            return XGBResult(model=_ConstantClassifier(prob=prob), calibrator=None, feature_names=feature_names)
         model = xgb.XGBClassifier(
             objective="binary:logistic",
             eval_metric="logloss",

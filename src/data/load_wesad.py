@@ -166,6 +166,7 @@ def load_wesad_dataset(
     schema: DataSchema,
     data_format: str = "auto",
     subjects: list[str] | None = None,
+    max_rows_per_subject: int | None = None,
 ) -> pd.DataFrame:
     """Load WESAD from native pickle folders or CSV exports."""
     path = Path(dataset_path)
@@ -177,12 +178,24 @@ def load_wesad_dataset(
     use_csv = data_format in {"auto", "csv"} and not use_pickles
 
     if use_pickles:
-        frames = [_load_wesad_subject_pickle(pkl_path, schema) for pkl_path in pickles]
+        frames = []
+        for pkl_path in pickles:
+            subject_df = _load_wesad_subject_pickle(pkl_path, schema)
+            if max_rows_per_subject and max_rows_per_subject > 0:
+                subject_df = subject_df.iloc[:max_rows_per_subject].copy()
+            frames.append(subject_df)
         if not frames:
             raise FileNotFoundError(f"No valid WESAD subject pickle files found under {path}")
         df = pd.concat(frames, ignore_index=True)
     elif use_csv:
         df = _load_wesad_csvs(path, schema)
+        if max_rows_per_subject and max_rows_per_subject > 0:
+            df = (
+                df.sort_values([schema.worker_id, schema.time_idx])
+                .groupby(schema.worker_id, observed=True)
+                .head(max_rows_per_subject)
+                .reset_index(drop=True)
+            )
     else:
         raise ValueError(
             f"Unsupported WESAD structure at {path}. "

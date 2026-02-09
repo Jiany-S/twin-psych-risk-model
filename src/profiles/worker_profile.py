@@ -44,7 +44,9 @@ class WorkerProfileStore:
                 sigma = float(values.std() + 1e-6)
                 self._global[col] = BaselineStats(mu=mu, sigma=sigma)
 
-        for worker_id, worker_df in df.groupby(worker_col):
+        for worker_id, worker_df in df.groupby(worker_col, observed=True):
+            if worker_df.empty:
+                continue
             worker_mask = mask.loc[worker_df.index]
             safe_df = worker_df[worker_mask.values]
             if safe_df.empty:
@@ -69,6 +71,8 @@ class WorkerProfileStore:
         return stats
 
     def _derive_meta(self, df: pd.DataFrame) -> dict[str, int]:
+        if df.empty:
+            return {"specialization_id": 0, "experience_level": 1}
         if "specialization_index" in df.columns:
             specialization_id = int(df["specialization_index"].iloc[0])
         elif "specialization_id" in df.columns:

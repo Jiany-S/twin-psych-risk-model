@@ -37,6 +37,7 @@ Thumbs.db
 *.zip
 
 data/raw/*.csv
+data/raw/wesad_subset/
 data/processed/*
 !data/processed/.gitkeep
 !data/raw/.gitkeep

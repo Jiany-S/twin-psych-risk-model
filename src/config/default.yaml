@@ -72,6 +72,8 @@ xgboost:
   colsample_bytree: 0.9
   early_stopping_rounds: 20
   calibration: isotonic   # isotonic | platt | none
+  tree_method: gpu_hist
+  predictor: gpu_predictor
 
 tft:
   strategy: multi_model
@@ -81,7 +83,7 @@ tft:
   dropout: 0.1
   batch_size: 64
   num_workers: 0
-  gpus: 0
+  gpus: 1
   early_stop_patience: 2
   learning_rate: 1.0e-3
   tft_loss: quantile  # quantile | bce
