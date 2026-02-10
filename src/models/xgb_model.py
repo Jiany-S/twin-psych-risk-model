@@ -74,7 +74,10 @@ def train_xgboost(
                 verbose=False,
                 early_stopping_rounds=params.get("early_stopping_rounds", 25),
             )
-        except TypeError:
+        except (TypeError, ValueError):
+            # Fall back for older xgboost versions without early_stopping_rounds or gpu_hist support.
+            if common_params.get("tree_method") == "gpu_hist":
+                model.set_params(tree_method="hist", predictor="auto")
             model.fit(X_train, y_train)
     else:
         model = xgb.XGBRegressor(
@@ -90,7 +93,9 @@ def train_xgboost(
                 verbose=False,
                 early_stopping_rounds=params.get("early_stopping_rounds", 25),
             )
-        except TypeError:
+        except (TypeError, ValueError):
+            if common_params.get("tree_method") == "gpu_hist":
+                model.set_params(tree_method="hist", predictor="auto")
             model.fit(X_train, y_train)
 
     calibrator = None

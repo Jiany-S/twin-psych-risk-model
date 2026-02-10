@@ -74,8 +74,8 @@ xgboost:
   colsample_bytree: 0.9
   early_stopping_rounds: 10
   calibration: isotonic
-  tree_method: gpu_hist
-  predictor: gpu_predictor
+  tree_method: auto
+  predictor: auto
 
 tft:
   strategy: multi_model

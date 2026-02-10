@@ -59,6 +59,7 @@ def build_tft_datasets(
         add_relative_time_idx=True,
         add_target_scales=False,
         target_normalizer=None,
+        allow_missing_timesteps=True,
         categorical_encoders=categorical_encoders,
     )
     # Validation should be created with predict=False for proper loss/early stopping.

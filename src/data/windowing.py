@@ -34,7 +34,7 @@ def create_time_splits(
     test_rows: list[pd.DataFrame] = []
     split_manifest: list[pd.DataFrame] = []
 
-    for worker_id, worker_df in df.groupby(schema.worker_id):
+    for worker_id, worker_df in df.groupby(schema.worker_id, observed=True):
         worker_df = worker_df.sort_values(schema.time_idx).reset_index(drop=True)
         n = len(worker_df)
         train_end = int(n * train_ratio)
