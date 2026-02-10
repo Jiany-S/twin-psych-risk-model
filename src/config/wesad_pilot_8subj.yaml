@@ -9,7 +9,7 @@ dataset:
   path: data/raw/wesad_subset
   format: auto
   subjects: ["S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11", "S13", "S14", "S15", "S16", "S17"]
-  downsample_factor: 10
+  downsample_factor: 5
 
 reproducibility:
   seed: 42
@@ -23,10 +23,10 @@ targets:
     label_col: y_comfort_proxy
 
 task:
-  horizon_steps: 5
-  window_length: 60
+  horizon_steps: 3
+  window_length: 30
   sampling_rate_hz: 4.0
-  window_step: 5
+  window_step: 1
 
 split:
   mode: subject_holdout
@@ -81,7 +81,7 @@ xgboost:
 
 tft:
   strategy: multi_model
-  max_epochs: 10
+  max_epochs: 5
   hidden_size: 24
   lstm_layers: 1
   dropout: 0.1
