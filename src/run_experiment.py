@@ -185,6 +185,11 @@ def _write_results_md(
     split_desc: str,
     profiles_enabled: bool,
 ) -> None:
+    tft_stress = metrics.get("tft", {}).get("stress", {})
+    tft_warning = ""
+    if isinstance(tft_stress, dict):
+        if str(tft_stress.get("auroc", "")).lower() == "nan":
+            tft_warning = "TFT AUROC is NaN; test split may contain a single class or too few windows."
     lines = [
         "# Experiment Results",
         "",
@@ -197,6 +202,7 @@ def _write_results_md(
         "- No-leakage profile fitting: baselines fit on train split only and reused on val/test.",
         f"- Stress AUROC winner: {metrics.get('comparison', {}).get('stress_winner_by_auroc', 'n/a')}",
         f"- Comfort RMSE winner: {metrics.get('comparison', {}).get('comfort_winner_by_rmse', 'n/a')}",
+        f"- TFT sanity note: {tft_warning}" if tft_warning else "- TFT sanity note: n/a",
         "",
         "## Metrics JSON Snapshot",
         "```json",
@@ -273,6 +279,9 @@ def run_experiment(config_path: str) -> Path:
     _save_processed(run_paths.root, train_w, val_w, test_w, split_manifest, flat_df)
 
     sampling_rate = float(cfg["task"].get("sampling_rate_hz", 1.0))
+    downsample_factor = int(cfg.get("dataset", {}).get("downsample_factor") or 1)
+    if downsample_factor > 1:
+        sampling_rate = sampling_rate / downsample_factor
     include_freq = bool(cfg["features"].get("hrv", {}).get("include_freq_domain", True))
     scr_threshold = float(cfg["features"].get("eda", {}).get("scr_threshold", 0.05))
     min_scr_distance = int(cfg["features"].get("eda", {}).get("min_scr_distance", 3))
@@ -297,12 +306,13 @@ def run_experiment(config_path: str) -> Path:
         "val": np.arange(len(train_w.y_stress), len(train_w.y_stress) + len(val_w.y_stress)),
         "test": np.arange(len(train_w.y_stress) + len(val_w.y_stress), len(y_stress_all)),
     }
+    window_counts = {"train": int(len(train_w.y_stress)), "val": int(len(val_w.y_stress)), "test": int(len(test_w.y_stress))}
 
     include_comfort = bool(cfg.get("targets", {}).get("multi_head", {}).get("enabled", True))
     models_cfg = cfg.get("models", {})
     run_xgb = bool(models_cfg.get("run_xgb", True))
     run_tft = bool(models_cfg.get("run_tft", True))
-    metrics: dict[str, Any] = {"config": cfg}
+    metrics: dict[str, Any] = {"config": cfg, "window_counts": window_counts}
     xgb_out = None
     tft_stress = None
     tft_comfort = None

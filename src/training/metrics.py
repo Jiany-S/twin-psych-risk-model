@@ -48,11 +48,16 @@ def optimal_threshold(y_true: np.ndarray, probs: np.ndarray, mode: str = "youden
 def classification_metrics(y_true: np.ndarray, probs: np.ndarray) -> dict[str, Any]:
     probs = np.clip(probs, 1e-6, 1 - 1e-6)
     y_pred = probs >= 0.5
-    try:
-        auc = roc_auc_score(y_true, probs)
-    except Exception:
+    unique = np.unique(y_true)
+    if unique.size < 2:
         auc = float("nan")
-    auprc = average_precision_score(y_true, probs)
+        auprc = float("nan")
+    else:
+        try:
+            auc = roc_auc_score(y_true, probs)
+        except Exception:
+            auc = float("nan")
+        auprc = average_precision_score(y_true, probs)
     brier = brier_score_loss(y_true, probs)
     ece = expected_calibration_error(probs, y_true, bins=15)
     try:
@@ -65,14 +70,15 @@ def classification_metrics(y_true: np.ndarray, probs: np.ndarray) -> dict[str, A
         "auroc": float(auc),
         "auprc": float(auprc),
         "accuracy": float(accuracy_score(y_true, y_pred)),
-        "f1": float(f1_score(y_true, y_pred)),
-        "precision": float(precision_score(y_true, y_pred)),
-        "recall": float(recall_score(y_true, y_pred)),
+        "f1": float(f1_score(y_true, y_pred, zero_division=0)),
+        "precision": float(precision_score(y_true, y_pred, zero_division=0)),
+        "recall": float(recall_score(y_true, y_pred, zero_division=0)),
         "brier": float(brier),
         "ece": float(ece),
-        "confusion_matrix_default": confusion_matrix(y_true, y_pred).tolist(),
+        "confusion_matrix_default": confusion_matrix(y_true, y_pred, labels=[0, 1]).tolist(),
         "optimal_threshold": float(optimal_thr),
-        "confusion_matrix_optimal": confusion_matrix(y_true, optimal_pred).tolist(),
+        "confusion_matrix_optimal": confusion_matrix(y_true, optimal_pred, labels=[0, 1]).tolist(),
+        "class_counts": {str(k): int((y_true == k).sum()) for k in np.unique(y_true)},
     }
 
 
