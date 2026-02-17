@@ -55,16 +55,18 @@ task:
   window_length: 60
   horizon_steps: 5
   sampling_rate_hz: 4.0
+  window_step: 1
 ```
 
 ## Notes
 - Run is CPU-friendly by default (`tft.max_epochs: 3` + early stopping).
 - If one model fails, the run still completes and records the error in `metrics.json`.
+- Profile ablation can be toggled via `models.run_ablation_profiles`; it is skipped automatically when `models.run_xgb: false`.
 
-## WESAD pilot (8 subjects)
-Prepare a local 8-subject subset from Kaggle-hosted WESAD:
+## WESAD subject-holdout pilot (15-subject default)
+Prepare the local subset from Kaggle-hosted WESAD (default list matches the pilot config):
 ```bash
-python scripts/prepare_wesad_subset.py --subjects "S2,S3,S4,S5,S6,S7,S8,S9"
+python scripts/prepare_wesad_subset.py --subjects "S2,S3,S4,S5,S6,S7,S8,S9,S10,S11,S13,S14,S15,S16,S17"
 ```
 
 Run pilot with profiles enabled:
@@ -77,6 +79,12 @@ Run pilot with profiles disabled:
 python -m src.run_experiment --config src/config/wesad_pilot_8subj_no_profiles.yaml
 ```
 
+Generate a paper-ready markdown summary for any run:
+```bash
+python scripts/make_paper_summary.py --run_dir experiments/runs/<timestamp>
+```
+
 Convenience scripts:
 - `scripts/run_wesad_pilot.sh`
 - `scripts/run_wesad_pilot.bat`
+  - both scripts now also generate `paper_summary.md` for the two latest pilot runs.

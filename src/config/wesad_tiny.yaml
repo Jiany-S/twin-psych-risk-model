@@ -5,7 +5,7 @@ paths:
 
 dataset:
   name: wesad
-  report_name: WESAD tiny (2 subjects)
+  report_name: WESAD tiny (1 subject)
   path: data/raw/wesad_subset
   format: auto
   subjects: ["S2"]
@@ -65,6 +65,7 @@ features:
 models:
   run_xgb: true
   run_tft: true
+  run_ablation_profiles: true
 
 xgboost:
   max_depth: 3

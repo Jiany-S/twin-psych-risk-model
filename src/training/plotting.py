@@ -142,3 +142,83 @@ def plot_feature_importance(importances: np.ndarray, feature_names: Sequence[str
     plt.tight_layout()
     plt.savefig(path)
     plt.close()
+
+
+def plot_threshold_sweep(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    path: Path,
+    optimal_threshold: float | None = None,
+    num_points: int = 100,
+) -> None:
+    """Plot precision-recall trade-off across classification thresholds.
+
+    Shows how precision and recall change as the decision threshold varies,
+    and optionally marks the optimal operating point.
+    """
+    thresholds = np.linspace(0.0, 1.0, num_points)
+    precisions = []
+    recalls = []
+    f1_scores = []
+
+    for thresh in thresholds:
+        y_pred = (y_prob >= thresh).astype(int)
+        tp = np.sum((y_pred == 1) & (y_true == 1))
+        fp = np.sum((y_pred == 1) & (y_true == 0))
+        fn = np.sum((y_pred == 0) & (y_true == 1))
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+        precisions.append(precision)
+        recalls.append(recall)
+        f1_scores.append(f1)
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(thresholds, precisions, label="Precision", linewidth=2)
+    plt.plot(thresholds, recalls, label="Recall", linewidth=2)
+    plt.plot(thresholds, f1_scores, label="F1 Score", linewidth=2, linestyle="--")
+
+    if optimal_threshold is not None and np.isfinite(optimal_threshold):
+        plt.axvline(optimal_threshold, color="red", linestyle=":", linewidth=2, label=f"Optimal ({optimal_threshold:.3f})")
+
+    plt.xlabel("Classification Threshold")
+    plt.ylabel("Score")
+    plt.title("Precision-Recall Trade-off vs Threshold")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
+
+
+def plot_tft_variable_importance(
+    importance_dict: dict[str, float],
+    path: Path,
+    top_k: int = 15,
+    title: str = "TFT Variable Importance",
+) -> None:
+    """Plot TFT variable importance from encoder/decoder variable selection.
+
+    Args:
+        importance_dict: Dictionary mapping variable names to importance scores
+        path: Output path for the plot
+        top_k: Number of top variables to display
+        title: Plot title
+    """
+    if not importance_dict:
+        return
+
+    items = sorted(importance_dict.items(), key=lambda x: abs(x[1]), reverse=True)[:top_k]
+    names = [item[0] for item in items]
+    values = [item[1] for item in items]
+
+    plt.figure(figsize=(8, 6))
+    plt.barh(range(len(values)), values)
+    plt.yticks(range(len(values)), names)
+    plt.xlabel("Importance Score")
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()

@@ -26,6 +26,7 @@ class TFTTaskArtifacts:
     targets: np.ndarray
     metrics: dict[str, Any]
     checkpoint_path: Path
+    variable_importance: dict[str, float] | None = None
 
 
 def _to_tensor(pred_obj: Any) -> torch.Tensor:
@@ -52,6 +53,46 @@ def _extract_target(y_obj: Any) -> torch.Tensor:
     if hasattr(y_obj, "target"):
         return _extract_target(y_obj.target)
     raise TypeError(f"Unsupported target structure: {type(y_obj)}")
+
+
+def _extract_tft_importance(model: Any, dataset: Any) -> dict[str, float] | None:
+    """Extract variable importance from TFT model's variable selection network.
+
+    Attempts to extract encoder and decoder variable importance weights
+    from the TFT model's attention/selection mechanisms.
+    """
+    try:
+        importance = {}
+
+        # Try to get encoder variable selection weights
+        if hasattr(model, "encoder_variable_selection"):
+            encoder_vars = getattr(dataset, "time_varying_unknown_reals", [])
+            encoder_vars += getattr(dataset, "time_varying_known_reals", [])
+            if hasattr(model.encoder_variable_selection, "weight_network"):
+                weights = model.encoder_variable_selection.weight_network
+                if hasattr(weights, "weight"):
+                    w = weights.weight.detach().cpu().numpy()
+                    if w.ndim >= 2:
+                        var_weights = np.abs(w).mean(axis=0)
+                        for i, var_name in enumerate(encoder_vars[:len(var_weights)]):
+                            importance[f"encoder_{var_name}"] = float(var_weights[i])
+
+        # Try to get static variable importance
+        if hasattr(model, "static_variable_selection"):
+            static_vars = getattr(dataset, "static_reals", []) + getattr(dataset, "static_categoricals", [])
+            if hasattr(model.static_variable_selection, "weight_network"):
+                weights = model.static_variable_selection.weight_network
+                if hasattr(weights, "weight"):
+                    w = weights.weight.detach().cpu().numpy()
+                    if w.ndim >= 2:
+                        var_weights = np.abs(w).mean(axis=0)
+                        for i, var_name in enumerate(static_vars[:len(var_weights)]):
+                            importance[f"static_{var_name}"] = float(var_weights[i])
+
+        return importance if importance else None
+    except Exception:
+        # Silently fail if importance extraction not supported
+        return None
 
 
 def train_tft_task(
@@ -156,4 +197,14 @@ def train_tft_task(
         metrics = classification_metrics(y_true, predictions)
     else:
         metrics = regression_metrics(y_true, predictions)
-    return TFTTaskArtifacts(predictions=predictions, targets=y_true, metrics=metrics, checkpoint_path=ckpt_path)
+
+    # Extract variable importance from TFT model
+    variable_importance = _extract_tft_importance(model, train_ds)
+
+    return TFTTaskArtifacts(
+        predictions=predictions,
+        targets=y_true,
+        metrics=metrics,
+        checkpoint_path=ckpt_path,
+        variable_importance=variable_importance,
+    )
