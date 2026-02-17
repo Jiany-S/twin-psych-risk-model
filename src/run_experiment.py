@@ -19,6 +19,7 @@ from .data.windowing import (
     create_subject_holdout_splits,
     create_time_splits,
     engineer_window_features,
+    validate_time_indices,
 )
 from .profiles.worker_profile import WorkerProfileStore
 from .training.plotting import (
@@ -27,6 +28,8 @@ from .training.plotting import (
     plot_feature_importance,
     plot_pr,
     plot_roc,
+    plot_tft_variable_importance,
+    plot_threshold_sweep,
     plot_timeseries,
 )
 from .training.tft_train import train_tft_task
@@ -161,19 +164,37 @@ def _comparison(metrics: dict[str, Any], include_comfort: bool) -> dict[str, Any
             ptr = ptr[key]
         return ptr
 
+    def valid_number(value: Any) -> bool:
+        return isinstance(value, (int, float, np.floating)) and np.isfinite(float(value))
+
+    xgb_stress_auroc = get(("xgboost", "stress", "auroc"), np.nan)
+    tft_stress_auroc = get(("tft", "stress", "auroc"), np.nan)
+    if valid_number(xgb_stress_auroc) and valid_number(tft_stress_auroc):
+        stress_winner = "xgboost" if xgb_stress_auroc >= tft_stress_auroc else "tft"
+    elif valid_number(xgb_stress_auroc):
+        stress_winner = "xgboost"
+    elif valid_number(tft_stress_auroc):
+        stress_winner = "tft"
+    else:
+        stress_winner = "n/a"
+
     result = {
-        "stress_winner_by_auroc": "xgboost"
-        if (get(("xgboost", "stress", "auroc"), -1) >= get(("tft", "stress", "auroc"), -1))
-        else "tft",
-        "delta_stress_auroc": float(get(("tft", "stress", "auroc"), np.nan) - get(("xgboost", "stress", "auroc"), np.nan)),
+        "stress_winner_by_auroc": stress_winner,
+        "delta_stress_auroc": float(tft_stress_auroc - xgb_stress_auroc),
     }
     if include_comfort:
-        result["comfort_winner_by_rmse"] = (
-            "xgboost" if (get(("xgboost", "comfort", "rmse"), 1e9) <= get(("tft", "comfort", "rmse"), 1e9)) else "tft"
-        )
-        result["delta_comfort_rmse"] = float(
-            get(("tft", "comfort", "rmse"), np.nan) - get(("xgboost", "comfort", "rmse"), np.nan)
-        )
+        xgb_comfort_rmse = get(("xgboost", "comfort", "rmse"), np.nan)
+        tft_comfort_rmse = get(("tft", "comfort", "rmse"), np.nan)
+        if valid_number(xgb_comfort_rmse) and valid_number(tft_comfort_rmse):
+            comfort_winner = "xgboost" if xgb_comfort_rmse <= tft_comfort_rmse else "tft"
+        elif valid_number(xgb_comfort_rmse):
+            comfort_winner = "xgboost"
+        elif valid_number(tft_comfort_rmse):
+            comfort_winner = "tft"
+        else:
+            comfort_winner = "n/a"
+        result["comfort_winner_by_rmse"] = comfort_winner
+        result["delta_comfort_rmse"] = float(tft_comfort_rmse - xgb_comfort_rmse)
     return result
 
 
@@ -225,6 +246,10 @@ def run_experiment(config_path: str) -> Path:
 
     raw_df = load_or_generate(cfg, schema)
     frame = preprocess_dataframe(cfg, raw_df, schema)
+
+    # Validate time indices are strictly increasing per worker
+    validate_time_indices(frame, schema)
+
     split_mode = str(cfg.get("split", {}).get("mode", "time")).lower()
     split_desc = "time-per-worker"
     if split_mode == "subject_holdout":
@@ -312,105 +337,113 @@ def run_experiment(config_path: str) -> Path:
     models_cfg = cfg.get("models", {})
     run_xgb = bool(models_cfg.get("run_xgb", True))
     run_tft = bool(models_cfg.get("run_tft", True))
+    run_ablation_profiles = bool(models_cfg.get("run_ablation_profiles", run_xgb))
     metrics: dict[str, Any] = {"config": cfg, "window_counts": window_counts}
     xgb_out = None
     tft_stress = None
     tft_comfort = None
 
-    try:
-        if not run_xgb:
-            raise RuntimeError("XGBoost disabled by config (models.run_xgb=false).")
-        xgb_out = train_xgb_tasks(
-            cfg=cfg,
-            feature_matrix=X_all,
-            feature_names=feat_names,
-            y_stress=y_stress_all,
-            y_comfort=y_comfort_all,
-            meta=meta_all,
-            static_profiles=static_profiles,
-            split_indices=split_idx,
-            run_dir=run_paths.root,
-            use_profiles=bool(cfg.get("profiles", {}).get("enabled", True)),
-            model_prefix="xgb",
-        )
-        xgb_metrics = {"stress": xgb_out["stress"].metrics | {"model_path": str(xgb_out["stress"].model_path)}}
-        if include_comfort:
-            xgb_metrics["comfort"] = xgb_out["comfort"].metrics | {"model_path": str(xgb_out["comfort"].model_path)}
-        metrics["xgboost"] = xgb_metrics
-        plot_feature_importance(
-            np.array([item["importance"] for item in xgb_out["stress"].feature_importance]),
-            [item["feature"] for item in xgb_out["stress"].feature_importance],
-            run_paths.plots / "feature_importance_xgb_stress.png",
-            top_k=cfg["report"]["top_k_features"],
-        )
-    except Exception as exc:
-        logger.exception("XGBoost pipeline failed: %s", exc)
-        metrics["xgboost"] = {"error": str(exc)}
+    if run_xgb:
+        try:
+            xgb_out = train_xgb_tasks(
+                cfg=cfg,
+                feature_matrix=X_all,
+                feature_names=feat_names,
+                y_stress=y_stress_all,
+                y_comfort=y_comfort_all,
+                meta=meta_all,
+                static_profiles=static_profiles,
+                split_indices=split_idx,
+                run_dir=run_paths.root,
+                use_profiles=bool(cfg.get("profiles", {}).get("enabled", True)),
+                model_prefix="xgb",
+            )
+            xgb_metrics = {"stress": xgb_out["stress"].metrics | {"model_path": str(xgb_out["stress"].model_path)}}
+            if include_comfort:
+                xgb_metrics["comfort"] = xgb_out["comfort"].metrics | {"model_path": str(xgb_out["comfort"].model_path)}
+            metrics["xgboost"] = xgb_metrics
+            plot_feature_importance(
+                np.array([item["importance"] for item in xgb_out["stress"].feature_importance]),
+                [item["feature"] for item in xgb_out["stress"].feature_importance],
+                run_paths.plots / "feature_importance_xgb_stress.png",
+                top_k=cfg["report"]["top_k_features"],
+            )
+        except Exception as exc:
+            logger.exception("XGBoost pipeline failed: %s", exc)
+            metrics["xgboost"] = {"error": str(exc)}
+    else:
+        metrics["xgboost"] = {"skipped": "XGBoost disabled by config (models.run_xgb=false)."}
 
-    try:
-        if not run_tft:
-            raise RuntimeError("TFT disabled by config (models.run_tft=false).")
-        tft_stress = train_tft_task(
-            cfg=cfg,
-            train_df=train_df.copy(),
-            val_df=val_df.copy(),
-            test_df=test_df.copy(),
-            schema=schema,
-            target_col=schema.stress_target,
-            task_type="classification",
-            run_dir=run_paths.root,
-            window_length=window_length,
-            horizon=horizon,
-            model_name="tft_stress",
-            use_profiles=bool(cfg.get("profiles", {}).get("enabled", True)),
-        )
-        tft_metrics = {"stress": tft_stress.metrics | {"checkpoint_path": str(tft_stress.checkpoint_path)}}
-        if include_comfort:
-            tft_comfort = train_tft_task(
+    if run_tft:
+        try:
+            tft_stress = train_tft_task(
                 cfg=cfg,
                 train_df=train_df.copy(),
                 val_df=val_df.copy(),
                 test_df=test_df.copy(),
                 schema=schema,
-                target_col=schema.comfort_target,
-                task_type="regression",
+                target_col=schema.stress_target,
+                task_type="classification",
                 run_dir=run_paths.root,
                 window_length=window_length,
                 horizon=horizon,
-                model_name="tft_comfort",
+                model_name="tft_stress",
                 use_profiles=bool(cfg.get("profiles", {}).get("enabled", True)),
             )
-            tft_metrics["comfort"] = tft_comfort.metrics | {"checkpoint_path": str(tft_comfort.checkpoint_path)}
-        metrics["tft"] = tft_metrics
-    except Exception as exc:
-        logger.exception("TFT pipeline failed: %s", exc)
-        metrics["tft"] = {"error": str(exc)}
+            tft_metrics = {"stress": tft_stress.metrics | {"checkpoint_path": str(tft_stress.checkpoint_path)}}
+            if include_comfort:
+                tft_comfort = train_tft_task(
+                    cfg=cfg,
+                    train_df=train_df.copy(),
+                    val_df=val_df.copy(),
+                    test_df=test_df.copy(),
+                    schema=schema,
+                    target_col=schema.comfort_target,
+                    task_type="regression",
+                    run_dir=run_paths.root,
+                    window_length=window_length,
+                    horizon=horizon,
+                    model_name="tft_comfort",
+                    use_profiles=bool(cfg.get("profiles", {}).get("enabled", True)),
+                )
+                tft_metrics["comfort"] = tft_comfort.metrics | {"checkpoint_path": str(tft_comfort.checkpoint_path)}
+            metrics["tft"] = tft_metrics
+        except Exception as exc:
+            logger.exception("TFT pipeline failed: %s", exc)
+            metrics["tft"] = {"error": str(exc)}
+    else:
+        metrics["tft"] = {"skipped": "TFT disabled by config (models.run_tft=false)."}
 
     # Ablation: profiles OFF using XGBoost only for fast comparison.
     ablation: dict[str, Any] = {}
-    try:
-        off_cfg = json.loads(json.dumps(cfg))
-        off_cfg["profiles"]["enabled"] = False
-        off_xgb = train_xgb_tasks(
-            cfg=off_cfg,
-            feature_matrix=X_all,
-            feature_names=feat_names,
-            y_stress=y_stress_all,
-            y_comfort=y_comfort_all,
-            meta=meta_all,
-            static_profiles=None,
-            split_indices=split_idx,
-            run_dir=run_paths.root,
-            use_profiles=False,
-            model_prefix="xgb_profiles_off",
-        )
-        ablation = {"profiles_on": {"stress_auroc": metrics.get("xgboost", {}).get("stress", {}).get("auroc")}}
-        ablation["profiles_off"] = {"stress_auroc": off_xgb["stress"].metrics.get("auroc")}
-        if include_comfort:
-            ablation["profiles_on"]["comfort_rmse"] = metrics.get("xgboost", {}).get("comfort", {}).get("rmse")
-            ablation["profiles_off"]["comfort_rmse"] = off_xgb["comfort"].metrics.get("rmse")
-    except Exception as exc:
-        ablation = {"error": str(exc)}
+    if run_ablation_profiles and run_xgb:
+        try:
+            off_cfg = json.loads(json.dumps(cfg))
+            off_cfg["profiles"]["enabled"] = False
+            off_xgb = train_xgb_tasks(
+                cfg=off_cfg,
+                feature_matrix=X_all,
+                feature_names=feat_names,
+                y_stress=y_stress_all,
+                y_comfort=y_comfort_all,
+                meta=meta_all,
+                static_profiles=None,
+                split_indices=split_idx,
+                run_dir=run_paths.root,
+                use_profiles=False,
+                model_prefix="xgb_profiles_off",
+            )
+            ablation = {"profiles_on": {"stress_auroc": metrics.get("xgboost", {}).get("stress", {}).get("auroc")}}
+            ablation["profiles_off"] = {"stress_auroc": off_xgb["stress"].metrics.get("auroc")}
+            if include_comfort:
+                ablation["profiles_on"]["comfort_rmse"] = metrics.get("xgboost", {}).get("comfort", {}).get("rmse")
+                ablation["profiles_off"]["comfort_rmse"] = off_xgb["comfort"].metrics.get("rmse")
+        except Exception as exc:
+            ablation = {"error": str(exc)}
+    elif not run_xgb:
+        ablation = {"skipped": "XGBoost disabled by config (models.run_xgb=false)."}
+    else:
+        ablation = {"skipped": "Profile ablation disabled by config (models.run_ablation_profiles=false)."}
 
     # Plots
     y_stress_test = y_stress_all[split_idx["test"]]
@@ -423,6 +456,13 @@ def run_experiment(config_path: str) -> Path:
         )
         cm = np.array(metrics.get("xgboost", {}).get("stress", {}).get("confusion_matrix_default", [[0, 0], [0, 0]]))
         plot_confusion_matrix(cm, run_paths.plots / "confusion_stress.png")
+        optimal_thresh = metrics.get("xgboost", {}).get("stress", {}).get("optimal_threshold", 0.5)
+        plot_threshold_sweep(
+            y_stress_test,
+            xgb_out["stress"].predictions,
+            run_paths.plots / "threshold_sweep_stress.png",
+            optimal_threshold=optimal_thresh,
+        )
         plot_timeseries(
             meta_all.iloc[split_idx["test"]],
             y_stress_test,
@@ -443,6 +483,13 @@ def run_experiment(config_path: str) -> Path:
             [("TFT", tft_stress.predictions)],
             run_paths.plots / "roc_curve_stress_tft.png",
         )
+        if tft_stress.variable_importance:
+            plot_tft_variable_importance(
+                tft_stress.variable_importance,
+                run_paths.plots / "tft_variable_importance_stress.png",
+                top_k=cfg["report"]["top_k_features"],
+                title="TFT Variable Importance (Stress)",
+            )
 
     metrics["comparison"] = _comparison(metrics, include_comfort=include_comfort)
     metrics["ablation_profiles"] = ablation

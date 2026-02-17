@@ -64,6 +64,11 @@ synthetic:
   missing_rate: 0.02
   seed: 123
 
+models:
+  run_xgb: true
+  run_tft: true
+  run_ablation_profiles: true
+
 xgboost:
   max_depth: 4
   n_estimators: 200

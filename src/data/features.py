@@ -41,8 +41,11 @@ def _hrv_freq_domain(rr_seconds: np.ndarray) -> dict[str, float]:
     freqs, psd = welch(rr_seconds, fs=4.0, nperseg=min(64, len(rr_seconds)))
     lf_mask = (freqs >= 0.04) & (freqs < 0.15)
     hf_mask = (freqs >= 0.15) & (freqs < 0.40)
-    lf = np.trapz(psd[lf_mask], freqs[lf_mask]) if np.any(lf_mask) else np.nan
-    hf = np.trapz(psd[hf_mask], freqs[hf_mask]) if np.any(hf_mask) else np.nan
+    integrate = getattr(np, "trapezoid", None)
+    if integrate is None:
+        integrate = getattr(np, "trapz")
+    lf = integrate(psd[lf_mask], freqs[lf_mask]) if np.any(lf_mask) else np.nan
+    hf = integrate(psd[hf_mask], freqs[hf_mask]) if np.any(hf_mask) else np.nan
     ratio = lf / hf if hf is not None and hf > 0 else np.nan
     return {"LF": float(lf), "HF": float(hf), "LF_HF": float(ratio)}
 

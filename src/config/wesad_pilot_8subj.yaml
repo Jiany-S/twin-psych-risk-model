@@ -5,7 +5,7 @@ paths:
 
 dataset:
   name: wesad
-  report_name: WESAD (all available subjects)
+  report_name: WESAD subject-holdout (15 subjects)
   path: data/raw/wesad_subset
   format: auto
   subjects: ["S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11", "S13", "S14", "S15", "S16", "S17"]
@@ -67,6 +67,7 @@ features:
 models:
   run_xgb: true
   run_tft: true
+  run_ablation_profiles: true
 
 xgboost:
   max_depth: 4

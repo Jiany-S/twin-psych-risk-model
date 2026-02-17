@@ -1,4 +1,4 @@
-"""Download WESAD with kagglehub and copy an 8-subject subset locally."""
+"""Download WESAD with kagglehub and copy a local subject subset."""
 
 from __future__ import annotations
 
@@ -8,7 +8,23 @@ import shutil
 from pathlib import Path
 
 
-DEFAULT_SUBJECTS = ["S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"]
+DEFAULT_SUBJECTS = [
+    "S2",
+    "S3",
+    "S4",
+    "S5",
+    "S6",
+    "S7",
+    "S8",
+    "S9",
+    "S10",
+    "S11",
+    "S13",
+    "S14",
+    "S15",
+    "S16",
+    "S17",
+]
 KAGGLE_DATASET = "orvile/wesad-wearable-stress-affect-detection-dataset"
 
 
@@ -38,12 +54,12 @@ def _discover_subject_dirs(root: Path) -> dict[str, Path]:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Prepare a local 8-subject WESAD subset.")
+    parser = argparse.ArgumentParser(description="Prepare a local WESAD subject subset.")
     parser.add_argument(
         "--subjects",
         type=str,
         default=",".join(DEFAULT_SUBJECTS),
-        help="Comma-separated subject IDs, e.g. S2,S3,S4,S5,S6,S7,S8,S9",
+        help="Comma-separated subject IDs, e.g. S2,S3,S4,S5,S6,S7,S8,S9,S10,S11,S13,S14,S15,S16,S17",
     )
     parser.add_argument(
         "--output",

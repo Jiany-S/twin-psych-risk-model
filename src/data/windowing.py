@@ -12,6 +12,26 @@ from .features import extract_window_features
 from .schema import DataSchema
 
 
+def validate_time_indices(df: pd.DataFrame, schema: DataSchema) -> None:
+    """Validate that time indices are strictly increasing per worker.
+
+    Raises:
+        ValueError: If time indices are not monotonically increasing for any worker.
+    """
+    for worker_id, worker_df in df.groupby(schema.worker_id, observed=True):
+        time_idx = worker_df[schema.time_idx].values
+        if len(time_idx) > 1:
+            diffs = np.diff(time_idx)
+            if not np.all(diffs > 0):
+                non_increasing = np.where(diffs <= 0)[0]
+                first_bad_idx = non_increasing[0]
+                raise ValueError(
+                    f"Time indices not strictly increasing for worker {worker_id}: "
+                    f"indices[{first_bad_idx}]={time_idx[first_bad_idx]} >= "
+                    f"indices[{first_bad_idx + 1}]={time_idx[first_bad_idx + 1]}"
+                )
+
+
 @dataclass
 class WindowedData:
     X_windows: np.ndarray

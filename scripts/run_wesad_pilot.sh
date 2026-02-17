@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SUBJECTS="${1:-S2,S3,S4,S5,S6,S7,S8,S9}"
+SUBJECTS="${1:-S2,S3,S4,S5,S6,S7,S8,S9,S10,S11,S13,S14,S15,S16,S17}"
 
 python scripts/prepare_wesad_subset.py --subjects "${SUBJECTS}"
 python -m src.run_experiment --config src/config/wesad_pilot_8subj.yaml
 python -m src.run_experiment --config src/config/wesad_pilot_8subj_no_profiles.yaml
 
 python - <<'PY'
+import subprocess
+import sys
 from pathlib import Path
 
 run_root = Path("experiments/runs")
@@ -21,4 +23,8 @@ else:
     print(f"Profiles OFF run dir: {off_run}")
     print(f"Metrics ON : {on_run / 'metrics.json'}")
     print(f"Metrics OFF: {off_run / 'metrics.json'}")
+    subprocess.check_call([sys.executable, "scripts/make_paper_summary.py", "--run_dir", str(on_run)])
+    subprocess.check_call([sys.executable, "scripts/make_paper_summary.py", "--run_dir", str(off_run)])
+    print(f"Paper summary ON : {on_run / 'paper_summary.md'}")
+    print(f"Paper summary OFF: {off_run / 'paper_summary.md'}")
 PY
