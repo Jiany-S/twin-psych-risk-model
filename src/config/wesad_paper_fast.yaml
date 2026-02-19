@@ -43,9 +43,12 @@ split:
 
 profiles:
   enabled: true
-  mode: online
   warmup_steps: 60
   use_static_meta: false
+
+normalization:
+  mode: online
+  warmup_steps: 60
 
 features:
   timestamp: timestamp

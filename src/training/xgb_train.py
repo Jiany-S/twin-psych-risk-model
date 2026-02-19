@@ -91,19 +91,42 @@ def train_xgb_tasks(
         feature_names=names,
     )
     val_probs = predict_xgb(stress.model, stress.calibrator, X_val, task_type="classification")
-    thresh_policy = str(cfg.get("xgboost", {}).get("threshold_policy", "f1")).lower()
-    target_recall = float(cfg.get("xgboost", {}).get("target_recall", 0.7))
-    chosen_thr = select_threshold_from_validation(
+    threshold_cfg = cfg.get("thresholding", {})
+    thresh_policy = str(
+        threshold_cfg.get("policy", cfg.get("xgboost", {}).get("threshold_policy", "f1"))
+    ).lower()
+    target_recall = float(
+        threshold_cfg.get("target_recall", cfg.get("xgboost", {}).get("target_recall", 0.7))
+    )
+    target_precision = float(
+        threshold_cfg.get("target_precision", cfg.get("xgboost", {}).get("target_precision", 0.7))
+    )
+    min_pred_rate = float(threshold_cfg.get("min_pred_rate", 0.02))
+    max_pred_rate = float(threshold_cfg.get("max_pred_rate", 0.98))
+    allow_pathological = bool(threshold_cfg.get("allow_pathological", False))
+    threshold_diag = select_threshold_from_validation(
         y_stress[val_idx],
         val_probs,
         policy=thresh_policy,
         target_recall=target_recall,
+        target_precision=target_precision,
+        min_pred_rate=min_pred_rate,
+        max_pred_rate=max_pred_rate,
+        allow_pathological=allow_pathological,
     )
+    chosen_thr = float(threshold_diag["threshold"])
     stress_pred = predict_xgb(stress.model, stress.calibrator, X_test, task_type="classification")
     stress_metrics = classification_metrics(y_stress[test_idx], stress_pred, chosen_threshold=chosen_thr)
     stress_metrics["threshold_policy"] = thresh_policy
     stress_metrics["val_selected_threshold"] = float(chosen_thr)
     stress_metrics["val_positive_rate_at_threshold"] = float(np.mean(val_probs >= chosen_thr))
+    stress_metrics["threshold_diagnostics"] = threshold_diag
+    stress_metrics["val_prob_stats"] = {
+        "min": float(np.min(val_probs)),
+        "max": float(np.max(val_probs)),
+        "mean": float(np.mean(val_probs)),
+        "std": float(np.std(val_probs)),
+    }
     stress_metrics["test_positive_count_default"] = int(np.sum(stress_pred >= 0.5))
     stress_metrics["test_positive_count_optimal"] = int(np.sum(stress_pred >= chosen_thr))
     stress_metrics["pred_min"] = float(np.min(stress_pred))

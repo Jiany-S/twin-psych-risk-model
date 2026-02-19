@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -17,7 +18,7 @@ except Exception:
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
 from ..models.tft_model import build_tft_datasets, create_tft_model
-from .metrics import classification_metrics, regression_metrics
+from .metrics import classification_metrics, regression_metrics, select_threshold_from_validation
 
 
 @dataclass
@@ -52,6 +53,42 @@ def _extract_target(y_obj: Any) -> torch.Tensor:
     if hasattr(y_obj, "target"):
         return _extract_target(y_obj.target)
     raise TypeError(f"Unsupported target structure: {type(y_obj)}")
+
+
+def _predict_with_targets(model: Any, loader: Any, model_name: str) -> tuple[np.ndarray, np.ndarray]:
+    try:
+        pred_out = model.predict(loader, return_y=True)
+    except Exception as exc:
+        raise RuntimeError(f"TFT prediction failed for {model_name}.") from exc
+
+    if isinstance(pred_out, tuple) and len(pred_out) == 2:
+        pred_obj, y_obj = pred_out
+    else:
+        pred_obj, y_obj = pred_out, None
+
+    pred_tensor = _to_tensor(pred_obj).detach().cpu()
+    if pred_tensor.ndim > 2:
+        pred_tensor = pred_tensor[..., -1]
+    elif pred_tensor.ndim == 2:
+        pred_tensor = pred_tensor[:, -1]
+    predictions = pred_tensor.numpy()
+
+    if y_obj is None:
+        targets = []
+        for batch in loader:
+            if not isinstance(batch, (list, tuple)) or len(batch) < 2:
+                raise ValueError(f"Unexpected dataloader batch structure for {model_name}: {type(batch)}")
+            y_tensor = _extract_target(batch[1]).detach().cpu()
+            if y_tensor.ndim > 1:
+                y_tensor = y_tensor[:, -1]
+            targets.append(y_tensor)
+        y_true = torch.cat(targets).numpy()
+    else:
+        y_true_tensor = _extract_target(y_obj).detach().cpu()
+        if y_true_tensor.ndim > 1:
+            y_true_tensor = y_true_tensor[:, -1]
+        y_true = y_true_tensor.numpy()
+    return predictions, y_true
 
 
 def train_tft_task(
@@ -92,18 +129,44 @@ def train_tft_task(
         val_df = _stride_rows(val_df, window_step)
         test_df = _stride_rows(test_df, window_step)
 
-    train_ds, val_ds = build_tft_datasets(
-        train_df=train_df,
-        val_df=val_df,
-        schema=schema,
-        target_col=target_col,
-        window_length=window_length,
-        horizon=horizon,
-        use_profiles=use_profiles,
-        known_categoricals=["task_phase"],
-    )
-    # Use predict=False so we evaluate on all available windows, not only the last per series.
-    test_ds = train_ds.from_dataset(train_ds, test_df, predict=False, stop_randomization=True)
+    # Ensure validation/test categorical values are known to encoders to avoid unknown-class warnings.
+    categorical_cols = ["worker_id", "specialization_index", "experience_level", "task_phase"]
+    unseen_workers = sorted(set(val_df["worker_id"]).union(set(test_df["worker_id"])) - set(train_df["worker_id"]))
+    if unseen_workers:
+        base = train_df.iloc[[0]].copy()
+        extra_rows: list[pd.DataFrame] = []
+        for worker in unseen_workers:
+            row = base.copy()
+            row["worker_id"] = str(worker)
+            row[schema.time_idx] = 0
+            row[target_col] = 0.0
+            for col in categorical_cols:
+                if col not in row.columns:
+                    row[col] = "UNK"
+            for col in schema.physiology:
+                if col in row.columns:
+                    row[col] = 0.0
+            extra_rows.append(row)
+        train_df = pd.concat([train_df, *extra_rows], ignore_index=True)
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Min encoder length and/or min_prediction_idx.*not present in the dataset index.*",
+            module="pytorch_forecasting.data.timeseries._timeseries",
+        )
+        train_ds, val_ds = build_tft_datasets(
+            train_df=train_df,
+            val_df=val_df,
+            schema=schema,
+            target_col=target_col,
+            window_length=window_length,
+            horizon=horizon,
+            use_profiles=use_profiles,
+            known_categoricals=["task_phase"],
+        )
+        # Use predict=False so we evaluate on all available windows, not only the last per series.
+        test_ds = train_ds.from_dataset(train_ds, test_df, predict=False, stop_randomization=True)
     train_loader = train_ds.to_dataloader(train=True, batch_size=tft_cfg["batch_size"], num_workers=tft_cfg["num_workers"])
     val_loader = val_ds.to_dataloader(train=False, batch_size=tft_cfg["batch_size"], num_workers=tft_cfg["num_workers"])
     test_loader = test_ds.to_dataloader(train=False, batch_size=tft_cfg["batch_size"], num_workers=tft_cfg["num_workers"])
@@ -125,6 +188,8 @@ def train_tft_task(
     ]
     accelerator = "gpu" if tft_cfg.get("gpus", 0) > 0 and torch.cuda.is_available() else "cpu"
     devices = min(int(tft_cfg.get("gpus", 0)), torch.cuda.device_count()) if accelerator == "gpu" else 1
+    if hasattr(pl, "seed_everything"):
+        pl.seed_everything(int(cfg.get("reproducibility", {}).get("seed", 42)), workers=True)
     trainer = pl.Trainer(
         max_epochs=tft_cfg["max_epochs"],
         callbacks=callbacks,
@@ -133,44 +198,20 @@ def train_tft_task(
         logger=False,
         enable_checkpointing=True,
     )
-    trainer.fit(model, train_loader, val_loader)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Found .* unknown classes which were set to NaN",
+            module="pytorch_forecasting.data.encoders",
+        )
+        trainer.fit(model, train_loader, val_loader)
 
     ckpt_path = Path(callbacks[1].best_model_path) if callbacks[1].best_model_path else run_dir / "models" / f"{model_name}.ckpt"
     if not ckpt_path.exists():
         trainer.save_checkpoint(ckpt_path)
 
-    try:
-        pred_out = model.predict(test_loader, return_y=True)
-    except Exception as exc:
-        raise RuntimeError(f"TFT prediction failed for {model_name}.") from exc
-
-    if isinstance(pred_out, tuple) and len(pred_out) == 2:
-        pred_obj, y_obj = pred_out
-    else:
-        pred_obj, y_obj = pred_out, None
-
-    pred_tensor = _to_tensor(pred_obj).detach().cpu()
-    if pred_tensor.ndim > 2:
-        pred_tensor = pred_tensor[..., -1]
-    elif pred_tensor.ndim == 2:
-        pred_tensor = pred_tensor[:, -1]
-    predictions = pred_tensor.numpy()
-
-    if y_obj is None:
-        targets = []
-        for batch in test_loader:
-            if not isinstance(batch, (list, tuple)) or len(batch) < 2:
-                raise ValueError(f"Unexpected dataloader batch structure for {model_name}: {type(batch)}")
-            y_tensor = _extract_target(batch[1]).detach().cpu()
-            if y_tensor.ndim > 1:
-                y_tensor = y_tensor[:, -1]
-            targets.append(y_tensor)
-        y_true = torch.cat(targets).numpy()
-    else:
-        y_true_tensor = _extract_target(y_obj).detach().cpu()
-        if y_true_tensor.ndim > 1:
-            y_true_tensor = y_true_tensor[:, -1]
-        y_true = y_true_tensor.numpy()
+    val_pred, y_val = _predict_with_targets(model, val_loader, model_name=f"{model_name}_val")
+    predictions, y_true = _predict_with_targets(model, test_loader, model_name=model_name)
     if len(predictions) != len(y_true):
         raise ValueError(f"TFT prediction/target length mismatch for {model_name}: {len(predictions)} vs {len(y_true)}")
     if debug:
@@ -182,9 +223,36 @@ def train_tft_task(
     if task_type == "classification":
         if cfg["tft"].get("tft_loss", "quantile") == "bce":
             predictions = 1.0 / (1.0 + np.exp(-predictions))
+            val_pred = 1.0 / (1.0 + np.exp(-val_pred))
         predictions = np.clip(predictions, 0.0, 1.0)
-        metrics = classification_metrics(y_true, predictions)
+        val_pred = np.clip(val_pred, 0.0, 1.0)
+        threshold_cfg = cfg.get("thresholding", {})
+        threshold_diag = select_threshold_from_validation(
+            y_val,
+            val_pred,
+            policy=str(threshold_cfg.get("policy", cfg.get("xgboost", {}).get("threshold_policy", "f1"))).lower(),
+            target_recall=float(threshold_cfg.get("target_recall", cfg.get("xgboost", {}).get("target_recall", 0.7))),
+            target_precision=float(
+                threshold_cfg.get("target_precision", cfg.get("xgboost", {}).get("target_precision", 0.7))
+            ),
+            min_pred_rate=float(threshold_cfg.get("min_pred_rate", 0.02)),
+            max_pred_rate=float(threshold_cfg.get("max_pred_rate", 0.98)),
+            allow_pathological=bool(threshold_cfg.get("allow_pathological", False)),
+        )
+        chosen_thr = float(threshold_diag["threshold"])
+        metrics = classification_metrics(y_true, predictions, chosen_threshold=chosen_thr)
+        metrics["threshold_policy"] = str(threshold_diag.get("policy", "f1"))
+        metrics["threshold_diagnostics"] = threshold_diag
+        metrics["val_selected_threshold"] = chosen_thr
+        metrics["val_positive_rate_at_threshold"] = float(np.mean(val_pred >= chosen_thr))
+        metrics["val_prob_stats"] = {
+            "min": float(np.min(val_pred)),
+            "max": float(np.max(val_pred)),
+            "mean": float(np.mean(val_pred)),
+            "std": float(np.std(val_pred)),
+        }
         metrics["test_positive_count_default"] = int(np.sum(predictions >= 0.5))
+        metrics["test_positive_count_optimal"] = int(np.sum(predictions >= chosen_thr))
         metrics["pred_min"] = float(np.min(predictions))
         metrics["pred_max"] = float(np.max(predictions))
     else:

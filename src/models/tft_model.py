@@ -33,9 +33,10 @@ def build_tft_datasets(
 
     # Match XGB window semantics: require a full encoder window for each prediction.
     min_encoder_length = int(window_length)
-    static_reals = []
+    static_reals: list[str] = []
+    profile_reals: list[str] = []
     if use_profiles:
-        static_reals = [f"baseline_mu_{f}" for f in schema.physiology] + [f"baseline_sigma_{f}" for f in schema.physiology]
+        profile_reals = [f"baseline_mu_{f}" for f in schema.physiology] + [f"baseline_sigma_{f}" for f in schema.physiology]
     categorical_encoders = {
         "worker_id": pf.data.encoders.NaNLabelEncoder(add_nan=True),
         "specialization_index": pf.data.encoders.NaNLabelEncoder(add_nan=True),
@@ -55,7 +56,7 @@ def build_tft_datasets(
         min_prediction_idx=0,
         static_categoricals=["worker_id", "specialization_index", "experience_level"],
         static_reals=static_reals,
-        time_varying_known_reals=list(schema.robot_context) + [schema.hazard_zone],
+        time_varying_known_reals=list(schema.robot_context) + [schema.hazard_zone] + profile_reals,
         time_varying_known_categoricals=list(known_categoricals or ["task_phase"]),
         time_varying_unknown_reals=list(schema.physiology),
         add_relative_time_idx=True,

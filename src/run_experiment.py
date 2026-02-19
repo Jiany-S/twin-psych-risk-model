@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -128,37 +129,20 @@ def _profile_transform(
 
     profiles_cfg = cfg.get("profiles", {})
     enabled = bool(profiles_cfg.get("enabled", True))
-    mode = str(profiles_cfg.get("mode", "global")).lower()
+    normalization_cfg = cfg.get("normalization", {})
+    # Keep normalization independent from profile-feature ablations.
+    mode = str(normalization_cfg.get("mode", profiles_cfg.get("mode", "global"))).lower()
     use_static_meta = bool(profiles_cfg.get("use_static_meta", False))
     alpha = float(cfg.get("profile", {}).get("ema_alpha", 0.1))
-    warmup_steps = int(profiles_cfg.get("warmup_steps", 30))
+    warmup_steps = int(normalization_cfg.get("warmup_steps", profiles_cfg.get("warmup_steps", 30)))
     fit_subjects = sorted(train_df[schema.worker_id].astype(str).unique().tolist())
-    if not enabled:
-        # Profiles OFF still uses train-only global normalization so ablations remain comparable.
-        stats: dict[str, tuple[float, float]] = {}
-        for col in schema.physiology:
-            series = train_df[col].astype(float).replace([np.inf, -np.inf], np.nan).dropna()
-            mu = float(series.mean()) if len(series) else 0.0
-            sigma = float(series.std() + 1e-6) if len(series) else 1.0
-            stats[col] = (mu, sigma)
-        train_z = apply_global_norm(train_df, stats)
-        val_z = apply_global_norm(val_df, stats)
-        test_z = apply_global_norm(test_df, stats)
-        empty_static = pd.DataFrame(columns=["worker_id", "specialization_index", "experience_level"])
-        return train_z, val_z, test_z, empty_static, {
-            "enabled": False,
-            "mode": "global",
-            "fit_subjects": fit_subjects,
-            "use_static_meta": False,
-        }
-
+    # Always normalize physiology signals regardless of profile ablation settings.
     if mode == "online":
         train_z = apply_online_norm(train_df, alpha=alpha, warmup_steps=warmup_steps)
         val_z = apply_online_norm(val_df, alpha=alpha, warmup_steps=warmup_steps)
         test_z = apply_online_norm(test_df, alpha=alpha, warmup_steps=warmup_steps)
-        static = pd.DataFrame(columns=["worker_id", "specialization_index", "experience_level"])
     else:
-        # default: global normalization from TRAIN only
+        # default: train-only global normalization
         stats: dict[str, tuple[float, float]] = {}
         for col in schema.physiology:
             series = train_df[col].astype(float).replace([np.inf, -np.inf], np.nan).dropna()
@@ -168,23 +152,26 @@ def _profile_transform(
         train_z = apply_global_norm(train_df, stats)
         val_z = apply_global_norm(val_df, stats)
         test_z = apply_global_norm(test_df, stats)
-        if use_static_meta:
-            profile_store = WorkerProfileStore(schema.physiology)
-            profile_store.fit_baselines(
-                train_df,
-                alpha=alpha,
-                safe_col=cfg.get("profile", {}).get("safe_col"),
-                worker_col=schema.worker_id,
-            )
-            static = profile_store.get_static_profile_table().rename(columns={"specialization_id": "specialization_index"})
-        else:
-            static = pd.DataFrame(columns=["worker_id", "specialization_index", "experience_level"])
+
+    if enabled and use_static_meta:
+        profile_store = WorkerProfileStore(schema.physiology)
+        profile_store.fit_baselines(
+            train_df,
+            alpha=alpha,
+            safe_col=cfg.get("profile", {}).get("safe_col"),
+            worker_col=schema.worker_id,
+        )
+        static = profile_store.get_static_profile_table().rename(columns={"specialization_id": "specialization_index"})
+    else:
+        static = pd.DataFrame(columns=["worker_id", "specialization_index", "experience_level"])
+
     return train_z, val_z, test_z, static, {
-        "enabled": True,
+        "enabled": enabled,
+        "normalization_mode": mode,
         "mode": mode,
         "warmup_steps": warmup_steps if mode == "online" else 0,
         "fit_subjects": fit_subjects,
-        "use_static_meta": use_static_meta,
+        "use_static_meta": use_static_meta if enabled else False,
     }
 
 
@@ -241,6 +228,111 @@ def _save_processed(run_dir: Path, train_w, val_w, test_w, split_manifest: pd.Da
     split_manifest.to_csv(processed_dir / "splits.csv", index=False)
     split_manifest.to_csv(run_dir / "splits.csv", index=False)
     flat_df.to_csv(processed_dir / "tft_flat.csv", index=False)
+
+
+def _safe_git_hash() -> str:
+    try:
+        return (
+            subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL)
+            .strip()
+        )
+    except Exception:
+        return "unknown"
+
+
+def _profile_feature_stats(train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame) -> dict[str, Any]:
+    cols = [c for c in train_df.columns if c.startswith("baseline_mu_") or c.startswith("baseline_sigma_")]
+    cols += [c for c in ["specialization_index", "experience_level"] if c in train_df.columns]
+    cols = sorted(set(cols))
+    out: dict[str, Any] = {}
+    for split_name, frame in (("train", train_df), ("val", val_df), ("test", test_df)):
+        split_stats: dict[str, Any] = {}
+        for col in cols:
+            series = pd.to_numeric(frame[col], errors="coerce")
+            non_na = series.dropna()
+            unique_ratio = float(non_na.nunique() / max(1, len(non_na)))
+            split_stats[col] = {
+                "mean": float(non_na.mean()) if len(non_na) else 0.0,
+                "std": float(non_na.std()) if len(non_na) else 0.0,
+                "min": float(non_na.min()) if len(non_na) else 0.0,
+                "max": float(non_na.max()) if len(non_na) else 0.0,
+                "unique_ratio": unique_ratio,
+                "missing_pct": float(series.isna().mean()),
+            }
+        out[split_name] = split_stats
+    return out
+
+
+def _numeric_feature_stats(train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame) -> dict[str, Any]:
+    numeric_cols = sorted(
+        set(train_df.select_dtypes(include=[np.number]).columns)
+        | set(val_df.select_dtypes(include=[np.number]).columns)
+        | set(test_df.select_dtypes(include=[np.number]).columns)
+    )
+
+    def split_stats(frame: pd.DataFrame) -> dict[str, Any]:
+        stats: dict[str, Any] = {}
+        for col in numeric_cols:
+            if col not in frame.columns:
+                continue
+            arr = pd.to_numeric(frame[col], errors="coerce").to_numpy(dtype=float)
+            finite = arr[np.isfinite(arr)]
+            stats[col] = {
+                "min": float(np.min(finite)) if finite.size else 0.0,
+                "max": float(np.max(finite)) if finite.size else 0.0,
+                "mean": float(np.mean(finite)) if finite.size else 0.0,
+                "std": float(np.std(finite)) if finite.size else 0.0,
+                "nan_pct": float(np.mean(np.isnan(arr))),
+                "inf_pct": float(np.mean(np.isinf(arr))),
+            }
+        return stats
+
+    return {
+        "train": split_stats(train_df),
+        "val": split_stats(val_df),
+        "test": split_stats(test_df),
+    }
+
+
+def _engineered_feature_stats(
+    X_train: np.ndarray, X_val: np.ndarray, X_test: np.ndarray, feature_names: list[str]
+) -> dict[str, Any]:
+    def _stats(arr: np.ndarray) -> dict[str, Any]:
+        finite = np.isfinite(arr)
+        return {
+            "shape": list(arr.shape),
+            "nan_count": int(np.isnan(arr).sum()),
+            "inf_count": int(np.isinf(arr).sum()),
+            "finite_ratio": float(finite.mean()) if arr.size else 1.0,
+        }
+
+    def _per_feature(arr: np.ndarray) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for idx, name in enumerate(feature_names):
+            col = arr[:, idx]
+            finite = col[np.isfinite(col)]
+            out[name] = {
+                "min": float(np.min(finite)) if finite.size else 0.0,
+                "max": float(np.max(finite)) if finite.size else 0.0,
+                "mean": float(np.mean(finite)) if finite.size else 0.0,
+                "std": float(np.std(finite)) if finite.size else 0.0,
+                "nan_pct": float(np.mean(np.isnan(col))),
+                "inf_pct": float(np.mean(np.isinf(col))),
+            }
+        return out
+
+    return {
+        "global": {
+            "train": _stats(X_train),
+            "val": _stats(X_val),
+            "test": _stats(X_test),
+        },
+        "per_feature": {
+            "train": _per_feature(X_train),
+            "val": _per_feature(X_val),
+            "test": _per_feature(X_test),
+        },
+    }
 
 
 def _comparison(metrics: dict[str, Any], include_comfort: bool) -> dict[str, Any]:
@@ -374,6 +466,15 @@ def run_experiment(config_path: str) -> Path:
     train_df = _attach_static(train_df, static_profiles, schema, use_static_meta=use_static_meta)
     val_df = _attach_static(val_df, static_profiles, schema, use_static_meta=use_static_meta)
     test_df = _attach_static(test_df, static_profiles, schema, use_static_meta=use_static_meta)
+    numeric_diag = _numeric_feature_stats(train_df, val_df, test_df)
+    required_numeric = list(schema.physiology) + list(schema.robot_context) + [schema.hazard_zone]
+    for split_name, frame in (("train", train_df), ("val", val_df), ("test", test_df)):
+        for col in required_numeric:
+            if col not in frame.columns:
+                continue
+            values = pd.to_numeric(frame[col], errors="coerce").to_numpy(dtype=float)
+            if np.isnan(values).any() or np.isinf(values).any():
+                raise ValueError(f"{split_name} has NaN/Inf in required numeric column {col}.")
     if debug:
         logger.info("Profiles: %s", profiles_info)
     flat_df = pd.concat([train_df, val_df, test_df], ignore_index=True)
@@ -422,6 +523,7 @@ def run_experiment(config_path: str) -> Path:
     X_test, _ = engineer_window_features(
         test_w.X_windows, schema, sampling_rate, include_freq, scr_threshold, min_scr_distance
     )
+    engineered_diag = _engineered_feature_stats(X_train, X_val, X_test, feat_names)
     X_all = np.concatenate([X_train, X_val, X_test], axis=0)
     y_stress_all = np.concatenate([train_w.y_stress, val_w.y_stress, test_w.y_stress], axis=0)
     y_comfort_all = np.concatenate([train_w.y_comfort, val_w.y_comfort, test_w.y_comfort], axis=0)
@@ -453,6 +555,7 @@ def run_experiment(config_path: str) -> Path:
     run_tft = bool(models_cfg.get("run_tft", True))
     metrics: dict[str, Any] = {
         "config": cfg,
+        "git_commit": _safe_git_hash(),
         "window_counts": window_counts,
         "class_balance": class_balance,
         "profiles_info": profiles_info,
@@ -595,6 +698,13 @@ def run_experiment(config_path: str) -> Path:
 
     metrics["comparison"] = _comparison(metrics, include_comfort=include_comfort)
     metrics["ablation_profiles"] = ablation
+    profile_stats = _profile_feature_stats(train_df, val_df, test_df)
+    save_json(profile_stats, run_paths.root / "profile_feature_stats.json")
+    metrics["profile_feature_stats_path"] = str(run_paths.root / "profile_feature_stats.json")
+    save_json(numeric_diag, run_paths.root / "numeric_feature_stats.json")
+    save_json(engineered_diag, run_paths.root / "engineered_feature_stats.json")
+    metrics["numeric_feature_stats_path"] = str(run_paths.root / "numeric_feature_stats.json")
+    metrics["engineered_feature_stats_path"] = str(run_paths.root / "engineered_feature_stats.json")
     save_json(metrics, run_paths.root / "metrics.json")
     _write_results_md(
         run_paths.root,

@@ -50,6 +50,21 @@ def main() -> None:
     xgb = metrics.get("xgboost", {}).get("stress", {})
     tft = metrics.get("tft", {}).get("stress", {})
     ablation = metrics.get("ablation_profiles", {})
+    test_counts = class_balance.get("test", {})
+    n_test = sum(int(v) for v in test_counts.values()) if isinstance(test_counts, dict) else 0
+    n_pos = int(test_counts.get("1.0", 0)) if isinstance(test_counts, dict) else 0
+    prevalence = (n_pos / n_test) if n_test else 0.0
+    validity_xgb = (
+        xgb.get("n_targets") == n_test
+        and str(_fmt(xgb.get("auroc"))) != "n/a"
+        and 0.02 <= float(xgb.get("optimal_positive_rate", 0.0)) <= 0.98
+    )
+    validity_tft = (
+        (tft.get("n_targets") in (n_test, n_test - 48, n_test + 48))
+        and str(_fmt(tft.get("auroc"))) != "n/a"
+        and 0.02 <= float(tft.get("optimal_positive_rate", 0.0)) <= 0.98
+    )
+    validity_line = f"xgb={validity_xgb}, tft={validity_tft}"
 
     lines = [
         "# Paper Summary",
@@ -61,11 +76,15 @@ def main() -> None:
         f"- Window/Horizon/Step seconds: {window_sec:.2f} / {horizon_sec:.2f} / {step_sec:.2f}",
         f"- Window counts (train/val/test): {window_counts}",
         f"- Class balance (train/val/test): {class_balance}",
+        f"- Test prevalence (positive rate): {_fmt(prevalence)}",
         f"- Threshold policy (XGBoost): {xgb.get('threshold_policy', 'n/a')}",
+        f"- Threshold policy (TFT): {tft.get('threshold_policy', 'n/a')}",
         "",
         "## Stress Classification (Test)",
         f"- XGBoost AUROC: {_fmt(xgb.get('auroc'))}, AUPRC: {_fmt(xgb.get('auprc'))}, F1: {_fmt(xgb.get('f1'))}",
         f"- TFT AUROC: {_fmt(tft.get('auroc'))}, AUPRC: {_fmt(tft.get('auprc'))}, F1: {_fmt(tft.get('f1'))}",
+        f"- XGBoost tuned threshold: {_fmt(xgb.get('optimal_threshold'))}",
+        f"- TFT tuned threshold: {_fmt(tft.get('optimal_threshold'))}",
         f"- XGBoost pred+ rate default/optimal: {_fmt(xgb.get('default_positive_rate'))} / {_fmt(xgb.get('optimal_positive_rate'))}",
         f"- TFT pred+ rate default/optimal: {_fmt(tft.get('default_positive_rate'))} / {_fmt(tft.get('optimal_positive_rate'))}",
         "",
@@ -76,6 +95,11 @@ def main() -> None:
         "## Personalization Ablation (XGBoost AUROC)",
         f"- Profiles ON: {_fmt(ablation.get('profiles_on', {}).get('stress_auroc'))}",
         f"- Profiles OFF: {_fmt(ablation.get('profiles_off', {}).get('stress_auroc'))}",
+        "",
+        "## Validity Checks",
+        f"- n_test from class balance: {n_test}",
+        f"- n_targets (XGB/TFT): {xgb.get('n_targets', 'n/a')} / {tft.get('n_targets', 'n/a')}",
+        f"- Checks passed: {validity_line}",
         "",
         "## Notes",
         "- If any AUROC/AUPRC are n/a, the test split likely contained only one class or too few windows.",
