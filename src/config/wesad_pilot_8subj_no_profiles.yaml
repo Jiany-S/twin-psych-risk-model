@@ -5,6 +5,7 @@ paths:
 
 dataset:
   name: wesad
+  source: local
   report_name: WESAD (all available subjects)
   path: data/raw/wesad_subset
   format: auto
@@ -44,7 +45,9 @@ profile:
 
 profiles:
   enabled: false
-  use_static_meta: true
+  mode: global
+  warmup_steps: 60
+  use_static_meta: false
 
 features:
   timestamp: timestamp
@@ -52,6 +55,7 @@ features:
   worker_id: worker_id
   protocol_label: protocol_label
   physiology: [ecg, eda, temp]
+  use_robot_context: false
   robot_context: [distance_to_robot, robot_speed]
   optional:
     hazard_zone: hazard_zone

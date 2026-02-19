@@ -12,7 +12,7 @@ import pandas as pd
 
 from ..data.features import impute_with_train_statistics
 from ..models.xgb_model import predict_xgb, train_xgboost
-from .metrics import classification_metrics, regression_metrics
+from .metrics import classification_metrics, regression_metrics, select_threshold_from_validation
 
 
 @dataclass
@@ -90,8 +90,26 @@ def train_xgb_tasks(
         params=cfg["xgboost"],
         feature_names=names,
     )
+    val_probs = predict_xgb(stress.model, stress.calibrator, X_val, task_type="classification")
+    thresh_policy = str(cfg.get("xgboost", {}).get("threshold_policy", "f1")).lower()
+    target_recall = float(cfg.get("xgboost", {}).get("target_recall", 0.7))
+    chosen_thr = select_threshold_from_validation(
+        y_stress[val_idx],
+        val_probs,
+        policy=thresh_policy,
+        target_recall=target_recall,
+    )
     stress_pred = predict_xgb(stress.model, stress.calibrator, X_test, task_type="classification")
-    stress_metrics = classification_metrics(y_stress[test_idx], stress_pred)
+    stress_metrics = classification_metrics(y_stress[test_idx], stress_pred, chosen_threshold=chosen_thr)
+    stress_metrics["threshold_policy"] = thresh_policy
+    stress_metrics["val_selected_threshold"] = float(chosen_thr)
+    stress_metrics["val_positive_rate_at_threshold"] = float(np.mean(val_probs >= chosen_thr))
+    stress_metrics["test_positive_count_default"] = int(np.sum(stress_pred >= 0.5))
+    stress_metrics["test_positive_count_optimal"] = int(np.sum(stress_pred >= chosen_thr))
+    stress_metrics["pred_min"] = float(np.min(stress_pred))
+    stress_metrics["pred_max"] = float(np.max(stress_pred))
+    stress_metrics["n_predictions"] = int(len(stress_pred))
+    stress_metrics["n_targets"] = int(len(y_stress[test_idx]))
     stress_imp = _importance(stress.model, names, cfg["report"]["top_k_features"])
     stress_path = run_dir / "models" / f"{model_prefix}_stress.pkl"
     joblib.dump({"model": stress.model, "calibrator": stress.calibrator, "feature_names": names}, stress_path)

@@ -65,15 +65,32 @@ def train_tft_task(
     run_dir: Path,
     window_length: int,
     horizon: int,
+    window_step: int,
     model_name: str,
     use_profiles: bool,
 ) -> TFTTaskArtifacts:
     tft_cfg = cfg["tft"]
+    debug = bool(cfg.get("debug", False))
+    if tft_cfg.get("gpus", 0) > 0 and not torch.cuda.is_available():
+        tft_cfg = dict(tft_cfg)
+        tft_cfg["gpus"] = 0
     for df in (train_df, val_df, test_df):
         df["worker_id"] = df["worker_id"].astype(str)
         df["specialization_index"] = df["specialization_index"].astype(str)
         df["experience_level"] = df["experience_level"].astype(str)
         df["task_phase"] = df["task_phase"].astype(str)
+        # Reindex time_idx per worker to ensure contiguous steps for TFT.
+        df[schema.time_idx] = df.groupby("worker_id", observed=True).cumcount().astype(int)
+    if window_step > 1:
+        def _stride_rows(frame: pd.DataFrame, step: int) -> pd.DataFrame:
+            pos = frame.groupby("worker_id", observed=True).cumcount()
+            keep = (pos % step) == 0
+            out = frame.loc[keep].copy()
+            out[schema.time_idx] = out.groupby("worker_id", observed=True).cumcount().astype(int)
+            return out
+        train_df = _stride_rows(train_df, window_step)
+        val_df = _stride_rows(val_df, window_step)
+        test_df = _stride_rows(test_df, window_step)
 
     train_ds, val_ds = build_tft_datasets(
         train_df=train_df,
@@ -85,10 +102,16 @@ def train_tft_task(
         use_profiles=use_profiles,
         known_categoricals=["task_phase"],
     )
-    test_ds = train_ds.from_dataset(train_ds, test_df, predict=True, stop_randomization=True)
+    # Use predict=False so we evaluate on all available windows, not only the last per series.
+    test_ds = train_ds.from_dataset(train_ds, test_df, predict=False, stop_randomization=True)
     train_loader = train_ds.to_dataloader(train=True, batch_size=tft_cfg["batch_size"], num_workers=tft_cfg["num_workers"])
     val_loader = val_ds.to_dataloader(train=False, batch_size=tft_cfg["batch_size"], num_workers=tft_cfg["num_workers"])
     test_loader = test_ds.to_dataloader(train=False, batch_size=tft_cfg["batch_size"], num_workers=tft_cfg["num_workers"])
+    if debug:
+        print(
+            f"[TFT DEBUG] {model_name} datasets: train={len(train_ds)}, val={len(val_ds)}, test={len(test_ds)} "
+            f"rows: train={len(train_df)}, val={len(val_df)}, test={len(test_df)}"
+        )
 
     model = create_tft_model(train_ds, tft_cfg)
     callbacks = [
@@ -148,12 +171,31 @@ def train_tft_task(
         if y_true_tensor.ndim > 1:
             y_true_tensor = y_true_tensor[:, -1]
         y_true = y_true_tensor.numpy()
+    if len(predictions) != len(y_true):
+        raise ValueError(f"TFT prediction/target length mismatch for {model_name}: {len(predictions)} vs {len(y_true)}")
+    if debug:
+        print(
+            f"[TFT DEBUG] {model_name} preds: n={len(predictions)} min={predictions.min():.4f} "
+            f"max={predictions.max():.4f} y_true_counts={np.unique(y_true, return_counts=True)}"
+        )
 
     if task_type == "classification":
         if cfg["tft"].get("tft_loss", "quantile") == "bce":
             predictions = 1.0 / (1.0 + np.exp(-predictions))
         predictions = np.clip(predictions, 0.0, 1.0)
         metrics = classification_metrics(y_true, predictions)
+        metrics["test_positive_count_default"] = int(np.sum(predictions >= 0.5))
+        metrics["pred_min"] = float(np.min(predictions))
+        metrics["pred_max"] = float(np.max(predictions))
     else:
         metrics = regression_metrics(y_true, predictions)
+    metrics["n_predictions"] = int(len(predictions))
+    metrics["n_targets"] = int(len(y_true))
+    metrics["window_step_used"] = int(window_step)
+    metrics["tft_train_dataset_len"] = int(len(train_ds))
+    metrics["tft_val_dataset_len"] = int(len(val_ds))
+    metrics["tft_test_dataset_len"] = int(len(test_ds))
+    metrics["tft_train_rows"] = int(len(train_df))
+    metrics["tft_val_rows"] = int(len(val_df))
+    metrics["tft_test_rows"] = int(len(test_df))
     return TFTTaskArtifacts(predictions=predictions, targets=y_true, metrics=metrics, checkpoint_path=ckpt_path)

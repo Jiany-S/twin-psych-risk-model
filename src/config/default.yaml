@@ -5,8 +5,12 @@ paths:
 
 dataset:
   name: synthetic   # wesad | synthetic | csv
+  source: local     # local | kaggle_api (wesad only)
   path: data/raw
   format: auto      # auto | wesad_pickle | csv
+  kaggle_dataset: orvile/wesad-wearable-stress-affect-detection-dataset
+  kaggle_cache_dir: data/raw/wesad_kaggle
+  kaggle_force_download: false
 
 reproducibility:
   seed: 42

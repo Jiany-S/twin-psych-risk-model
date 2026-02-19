@@ -36,6 +36,16 @@ def main() -> None:
     split = metrics.get("config", {}).get("split", {})
     split_desc = f"train={split.get('train_subjects', 'n/a')}, val={split.get('val_subjects', 'n/a')}, test={split.get('test_subjects', 'n/a')}"
     window_counts = metrics.get("window_counts", {})
+    class_balance = metrics.get("class_balance", {})
+    task_name = metrics.get("task_name", "stress")
+    task_cfg = cfg.get("task", {})
+    ds_cfg = cfg.get("dataset", {})
+    sampling = float(task_cfg.get("sampling_rate_hz", 1.0))
+    downsample = int(ds_cfg.get("downsample_factor") or 1)
+    effective_hz = sampling / max(1, downsample)
+    window_sec = float(task_cfg.get("window_length", 1)) / max(effective_hz, 1e-6)
+    horizon_sec = float(task_cfg.get("horizon_steps", 1)) / max(effective_hz, 1e-6)
+    step_sec = float(task_cfg.get("window_step", 1)) / max(effective_hz, 1e-6)
 
     xgb = metrics.get("xgboost", {}).get("stress", {})
     tft = metrics.get("tft", {}).get("stress", {})
@@ -47,11 +57,17 @@ def main() -> None:
         "## Setup",
         f"- Dataset: {dataset}",
         f"- Split: {split_desc}",
+        f"- Task: {task_name}",
+        f"- Window/Horizon/Step seconds: {window_sec:.2f} / {horizon_sec:.2f} / {step_sec:.2f}",
         f"- Window counts (train/val/test): {window_counts}",
+        f"- Class balance (train/val/test): {class_balance}",
+        f"- Threshold policy (XGBoost): {xgb.get('threshold_policy', 'n/a')}",
         "",
         "## Stress Classification (Test)",
         f"- XGBoost AUROC: {_fmt(xgb.get('auroc'))}, AUPRC: {_fmt(xgb.get('auprc'))}, F1: {_fmt(xgb.get('f1'))}",
         f"- TFT AUROC: {_fmt(tft.get('auroc'))}, AUPRC: {_fmt(tft.get('auprc'))}, F1: {_fmt(tft.get('f1'))}",
+        f"- XGBoost pred+ rate default/optimal: {_fmt(xgb.get('default_positive_rate'))} / {_fmt(xgb.get('optimal_positive_rate'))}",
+        f"- TFT pred+ rate default/optimal: {_fmt(tft.get('default_positive_rate'))} / {_fmt(tft.get('optimal_positive_rate'))}",
         "",
         "## Calibration",
         f"- XGBoost Brier: {_fmt(xgb.get('brier'))}, ECE: {_fmt(xgb.get('ece'))}",

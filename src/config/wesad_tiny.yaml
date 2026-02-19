@@ -5,6 +5,7 @@ paths:
 
 dataset:
   name: wesad
+  source: local
   report_name: WESAD tiny (2 subjects)
   path: data/raw/wesad_subset
   format: auto
@@ -50,6 +51,7 @@ features:
   worker_id: worker_id
   protocol_label: protocol_label
   physiology: [ecg, eda, temp]
+  use_robot_context: false
   robot_context: [distance_to_robot, robot_speed]
   optional:
     hazard_zone: hazard_zone

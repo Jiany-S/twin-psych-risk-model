@@ -12,10 +12,15 @@ import pandas as pd
 from .schema import DataSchema
 
 
-LABEL_MAP_STRESS = {
+LABEL_MAP_STRESS_DEFAULT = {
     1: 0.0,  # baseline
     2: 1.0,  # stress
-    3: np.nan,  # amusement excluded from stress binary by default
+    3: np.nan,  # amusement excluded by default
+}
+LABEL_MAP_STRESS_INCLUDE_AMUSEMENT = {
+    1: 0.0,
+    2: 1.0,
+    3: 0.0,  # treat amusement as non-stress
 }
 LABEL_MAP_COMFORT = {
     1: 0.9,  # baseline
@@ -56,7 +61,11 @@ def _extract_signal(signal_dict: dict[str, Any], key: str) -> np.ndarray | None:
     return arr.astype(float)
 
 
-def _load_wesad_subject_pickle(pkl_path: Path, schema: DataSchema) -> pd.DataFrame:
+def _load_wesad_subject_pickle(
+    pkl_path: Path,
+    schema: DataSchema,
+    stress_include_amusement: bool = False,
+) -> pd.DataFrame:
     with pkl_path.open("rb") as fh:
         data = pickle.load(fh, encoding="latin1")
 
@@ -98,6 +107,7 @@ def _load_wesad_subject_pickle(pkl_path: Path, schema: DataSchema) -> pd.DataFra
     resp = resp[:n] if resp is not None else np.full(n, np.nan)
     acc = acc[:n] if acc is not None else np.full(n, np.nan)
 
+    label_map_stress = LABEL_MAP_STRESS_INCLUDE_AMUSEMENT if stress_include_amusement else LABEL_MAP_STRESS_DEFAULT
     df = pd.DataFrame(
         {
             schema.worker_id: _subject_id_from_path(pkl_path),
@@ -109,7 +119,7 @@ def _load_wesad_subject_pickle(pkl_path: Path, schema: DataSchema) -> pd.DataFra
             "resp": resp,
             "accel": acc,
             schema.protocol_label: pd.Series(label).map(PROTOCOL_MAP).fillna("other"),
-            schema.stress_target: pd.Series(label).map(LABEL_MAP_STRESS),
+            schema.stress_target: pd.Series(label).map(label_map_stress),
             schema.comfort_target: pd.Series(label).map(LABEL_MAP_COMFORT),
         }
     )
@@ -119,7 +129,7 @@ def _load_wesad_subject_pickle(pkl_path: Path, schema: DataSchema) -> pd.DataFra
     return df.reset_index(drop=True)
 
 
-def _load_wesad_csvs(path: Path, schema: DataSchema) -> pd.DataFrame:
+def _load_wesad_csvs(path: Path, schema: DataSchema, stress_include_amusement: bool = False) -> pd.DataFrame:
     files = sorted(path.rglob("*.csv"))
     if not files:
         raise FileNotFoundError(f"No CSV files found in {path}.")
@@ -140,13 +150,19 @@ def _load_wesad_csvs(path: Path, schema: DataSchema) -> pd.DataFrame:
             protocol_raw = frame[schema.protocol_label]
             protocol_num = pd.to_numeric(protocol_raw, errors="coerce")
             if protocol_num.notna().any():
-                frame[schema.stress_target] = protocol_num.map(LABEL_MAP_STRESS)
+                label_map_stress = (
+                    LABEL_MAP_STRESS_INCLUDE_AMUSEMENT if stress_include_amusement else LABEL_MAP_STRESS_DEFAULT
+                )
+                frame[schema.stress_target] = protocol_num.map(label_map_stress)
                 frame[schema.comfort_target] = protocol_num.map(LABEL_MAP_COMFORT)
                 frame[schema.protocol_label] = protocol_num.map(PROTOCOL_MAP).fillna("other")
             else:
                 text = protocol_raw.astype(str).str.lower()
                 frame[schema.protocol_label] = text
-                frame[schema.stress_target] = text.map({"baseline": 0.0, "stress": 1.0, "amusement": np.nan})
+                if stress_include_amusement:
+                    frame[schema.stress_target] = text.map({"baseline": 0.0, "stress": 1.0, "amusement": 0.0})
+                else:
+                    frame[schema.stress_target] = text.map({"baseline": 0.0, "stress": 1.0, "amusement": np.nan})
                 frame[schema.comfort_target] = text.map({"baseline": 0.9, "stress": 0.2, "amusement": 0.7})
         else:
             if schema.stress_target not in frame.columns or schema.comfort_target not in frame.columns:
@@ -168,6 +184,7 @@ def load_wesad_dataset(
     subjects: list[str] | None = None,
     max_rows_per_subject: int | None = None,
     downsample_factor: int | None = None,
+    stress_include_amusement: bool = False,
 ) -> pd.DataFrame:
     """Load WESAD from native pickle folders or CSV exports."""
     path = Path(dataset_path)
@@ -181,31 +198,33 @@ def load_wesad_dataset(
     if use_pickles:
         frames = []
         for pkl_path in pickles:
-            subject_df = _load_wesad_subject_pickle(pkl_path, schema)
-            if max_rows_per_subject and max_rows_per_subject > 0:
-                subject_df = subject_df.iloc[:max_rows_per_subject].copy()
+            subject_df = _load_wesad_subject_pickle(pkl_path, schema, stress_include_amusement=stress_include_amusement)
             if downsample_factor and downsample_factor > 1:
                 subject_df = subject_df.iloc[::downsample_factor].copy()
+            if max_rows_per_subject and max_rows_per_subject > 0 and len(subject_df) > max_rows_per_subject:
+                idx = np.linspace(0, len(subject_df) - 1, max_rows_per_subject).astype(int)
+                subject_df = subject_df.iloc[idx].copy()
             frames.append(subject_df)
         if not frames:
             raise FileNotFoundError(f"No valid WESAD subject pickle files found under {path}")
         df = pd.concat(frames, ignore_index=True)
     elif use_csv:
-        df = _load_wesad_csvs(path, schema)
-        if max_rows_per_subject and max_rows_per_subject > 0:
-            df = (
-                df.sort_values([schema.worker_id, schema.time_idx])
-                .groupby(schema.worker_id, observed=True)
-                .head(max_rows_per_subject)
-                .reset_index(drop=True)
-            )
+        df = _load_wesad_csvs(path, schema, stress_include_amusement=stress_include_amusement)
+        df = df.sort_values([schema.worker_id, schema.time_idx])
         if downsample_factor and downsample_factor > 1:
             df = (
-                df.sort_values([schema.worker_id, schema.time_idx])
-                .groupby(schema.worker_id, observed=True)
+                df.groupby(schema.worker_id, observed=True)
                 .apply(lambda g: g.iloc[::downsample_factor])
                 .reset_index(drop=True)
             )
+        if max_rows_per_subject and max_rows_per_subject > 0:
+            def _sample(g: pd.DataFrame) -> pd.DataFrame:
+                if len(g) <= max_rows_per_subject:
+                    return g
+                idx = np.linspace(0, len(g) - 1, max_rows_per_subject).astype(int)
+                return g.iloc[idx]
+
+            df = df.groupby(schema.worker_id, observed=True).apply(_sample).reset_index(drop=True)
     else:
         raise ValueError(
             f"Unsupported WESAD structure at {path}. "

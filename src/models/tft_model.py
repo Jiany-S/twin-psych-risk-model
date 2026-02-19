@@ -31,7 +31,8 @@ def build_tft_datasets(
     pf = _require_tft()
     TimeSeriesDataSet = pf.TimeSeriesDataSet
 
-    min_encoder_length = max(2, window_length // 2)
+    # Match XGB window semantics: require a full encoder window for each prediction.
+    min_encoder_length = int(window_length)
     static_reals = []
     if use_profiles:
         static_reals = [f"baseline_mu_{f}" for f in schema.physiology] + [f"baseline_sigma_{f}" for f in schema.physiology]
@@ -51,6 +52,7 @@ def build_tft_datasets(
         min_encoder_length=min_encoder_length,
         max_prediction_length=horizon,
         min_prediction_length=horizon,
+        min_prediction_idx=0,
         static_categoricals=["worker_id", "specialization_index", "experience_level"],
         static_reals=static_reals,
         time_varying_known_reals=list(schema.robot_context) + [schema.hazard_zone],

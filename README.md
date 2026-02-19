@@ -18,12 +18,26 @@ Artifacts are saved under `experiments/runs/<timestamp>/`:
 ## Datasets
 Configured via `dataset` in `src/config/default.yaml`.
 - `dataset.name: wesad | synthetic | csv`
-- `dataset.path`: local path to dataset root/file
+- `dataset.source: local | kaggle_api` (WESAD only)
+- `dataset.path`: local path to dataset root/file (for `source: local`)
 - `dataset.format: auto | wesad_pickle | csv`
+- `dataset.kaggle_dataset`: Kaggle dataset id (for `source: kaggle_api`)
+- `dataset.kaggle_cache_dir`: where downloaded Kaggle files are extracted
 
 WESAD loader supports:
 - native `S*/S*.pkl`
 - CSV exports
+
+Kaggle API mode example:
+```yaml
+dataset:
+  name: wesad
+  source: kaggle_api
+  kaggle_dataset: orvile/wesad-wearable-stress-affect-detection-dataset
+  kaggle_cache_dir: data/raw/wesad_kaggle
+  format: auto
+```
+This requires Kaggle credentials (`~/.kaggle/kaggle.json` or `KAGGLE_USERNAME`/`KAGGLE_KEY`).
 
 Unified columns include:
 - `timestamp`, `time_idx`, `worker_id`

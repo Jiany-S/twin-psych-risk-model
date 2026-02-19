@@ -1,0 +1,58 @@
+paths:
+  raw_dir: data/raw
+  raw_file: data/raw/data.csv
+  run_root: experiments/runs
+
+dataset:
+  name: synthetic
+
+reproducibility:
+  seed: 42
+
+debug: true
+
+targets:
+  multi_head:
+    enabled: false
+  stress:
+    label_col: y_stress
+  comfort:
+    label_col: y_comfort_proxy
+
+task:
+  horizon_steps: 3
+  window_length: 30
+  sampling_rate_hz: 4.0
+  window_step: 1
+
+split:
+  mode: time
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  seed: 42
+
+profiles:
+  enabled: false
+
+features:
+  timestamp: timestamp
+  time_idx: time_idx
+  worker_id: worker_id
+  protocol_label: protocol_label
+  physiology: [ecg, eda, temp]
+  use_robot_context: true
+  robot_context: [distance_to_robot, robot_speed]
+  optional:
+    hazard_zone: hazard_zone
+    task_phase: task_phase
+    specialization_col: specialization_index
+    experience_col: experience_level
+
+synthetic:
+  enabled_if_missing: true
+  use_existing_raw: false
+  num_workers: 4
+  num_timesteps: 200
+  missing_rate: 0.0
+  seed: 123

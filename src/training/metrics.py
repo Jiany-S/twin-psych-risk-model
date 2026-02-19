@@ -45,9 +45,43 @@ def optimal_threshold(y_true: np.ndarray, probs: np.ndarray, mode: str = "youden
     return float(thr[int(np.argmax(youden))])
 
 
-def classification_metrics(y_true: np.ndarray, probs: np.ndarray) -> dict[str, Any]:
+def select_threshold_from_validation(
+    y_true: np.ndarray,
+    probs: np.ndarray,
+    policy: str = "f1",
+    target_recall: float = 0.7,
+) -> float:
     probs = np.clip(probs, 1e-6, 1 - 1e-6)
-    y_pred = probs >= 0.5
+    thresholds = np.linspace(0.01, 0.99, 99)
+    if policy == "target_recall":
+        best_thr = 0.5
+        best_prec = -1.0
+        for t in thresholds:
+            pred = probs >= t
+            rec = recall_score(y_true, pred, zero_division=0)
+            if rec >= target_recall:
+                prec = precision_score(y_true, pred, zero_division=0)
+                if prec > best_prec:
+                    best_prec = prec
+                    best_thr = float(t)
+        return float(best_thr)
+    # default: maximize F1
+    best_thr = 0.5
+    best_f1 = -1.0
+    for t in thresholds:
+        pred = probs >= t
+        score = f1_score(y_true, pred, zero_division=0)
+        if score > best_f1:
+            best_f1 = score
+            best_thr = float(t)
+    return float(best_thr)
+
+
+def classification_metrics(y_true: np.ndarray, probs: np.ndarray, chosen_threshold: float | None = None) -> dict[str, Any]:
+    probs = np.clip(probs, 1e-6, 1 - 1e-6)
+    y_pred_default = probs >= 0.5
+    threshold = float(chosen_threshold if chosen_threshold is not None else 0.5)
+    y_pred_optimal = probs >= threshold
     unique = np.unique(y_true)
     if unique.size < 2:
         auc = float("nan")
@@ -60,24 +94,24 @@ def classification_metrics(y_true: np.ndarray, probs: np.ndarray) -> dict[str, A
         auprc = average_precision_score(y_true, probs)
     brier = brier_score_loss(y_true, probs)
     ece = expected_calibration_error(probs, y_true, bins=15)
-    try:
-        optimal_thr = optimal_threshold(y_true, probs, mode="youden")
-    except Exception:
-        optimal_thr = 0.5
-    optimal_pred = probs >= optimal_thr
+    default_pos_rate = float(np.mean(y_pred_default))
+    optimal_pos_rate = float(np.mean(y_pred_optimal))
 
     return {
         "auroc": float(auc),
         "auprc": float(auprc),
-        "accuracy": float(accuracy_score(y_true, y_pred)),
-        "f1": float(f1_score(y_true, y_pred, zero_division=0)),
-        "precision": float(precision_score(y_true, y_pred, zero_division=0)),
-        "recall": float(recall_score(y_true, y_pred, zero_division=0)),
+        "accuracy": float(accuracy_score(y_true, y_pred_optimal)),
+        "f1": float(f1_score(y_true, y_pred_optimal, zero_division=0)),
+        "precision": float(precision_score(y_true, y_pred_optimal, zero_division=0)),
+        "recall": float(recall_score(y_true, y_pred_optimal, zero_division=0)),
         "brier": float(brier),
         "ece": float(ece),
-        "confusion_matrix_default": confusion_matrix(y_true, y_pred, labels=[0, 1]).tolist(),
-        "optimal_threshold": float(optimal_thr),
-        "confusion_matrix_optimal": confusion_matrix(y_true, optimal_pred, labels=[0, 1]).tolist(),
+        "confusion_matrix_default": confusion_matrix(y_true, y_pred_default, labels=[0, 1]).tolist(),
+        "optimal_threshold": float(threshold),
+        "chosen_threshold": float(threshold),
+        "confusion_matrix_optimal": confusion_matrix(y_true, y_pred_optimal, labels=[0, 1]).tolist(),
+        "default_positive_rate": default_pos_rate,
+        "optimal_positive_rate": optimal_pos_rate,
         "class_counts": {str(k): int((y_true == k).sum()) for k in np.unique(y_true)},
     }
 

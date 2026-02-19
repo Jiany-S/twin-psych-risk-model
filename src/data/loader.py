@@ -7,13 +7,23 @@ from typing import Mapping
 
 import pandas as pd
 
+from .kaggle_api import fetch_kaggle_dataset
 from .load_wesad import load_wesad_dataset
 from .schema import DataSchema
 from .synthetic import generate_synthetic_dataset
 
 
 def _load_csv_files(raw_dir: Path) -> list[pd.DataFrame]:
-    return [pd.read_csv(file_path) for file_path in sorted(raw_dir.rglob("*.csv"))]
+    frames: list[pd.DataFrame] = []
+    for file_path in sorted(raw_dir.rglob("*.csv")):
+        try:
+            frame = pd.read_csv(file_path)
+        except pd.errors.EmptyDataError:
+            continue
+        if frame.empty or len(frame.columns) == 0:
+            continue
+        frames.append(frame)
+    return frames
 
 
 def _load_generic_csv(path: Path, schema: DataSchema) -> pd.DataFrame:
@@ -40,21 +50,40 @@ def load_or_generate(cfg: Mapping[str, object], schema: DataSchema) -> pd.DataFr
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     if dataset_name == "wesad":
-        if not dataset_path:
-            raise FileNotFoundError("dataset.path is required when dataset.name is 'wesad'.")
+        source_mode = str(dataset_cfg.get("source", "local")).lower()
+        if source_mode not in {"local", "kaggle_api"}:
+            raise ValueError("dataset.source must be one of: local, kaggle_api")
+        if source_mode == "local":
+            if not dataset_path:
+                raise FileNotFoundError("dataset.path is required when dataset.name is 'wesad' and source=local.")
+            resolved_path = dataset_path
+        else:
+            kaggle_dataset = str(
+                dataset_cfg.get("kaggle_dataset", "orvile/wesad-wearable-stress-affect-detection-dataset")
+            )
+            cache_dir = dataset_cfg.get("kaggle_cache_dir") or dataset_path or (raw_dir / "wesad_kaggle")
+            force_download = bool(dataset_cfg.get("kaggle_force_download", False))
+            resolved_path = fetch_kaggle_dataset(
+                dataset_ref=kaggle_dataset,
+                target_dir=cache_dir,
+                force_download=force_download,
+                quiet=True,
+            )
         subjects = dataset_cfg.get("subjects")
         subject_list = [str(s) for s in subjects] if isinstance(subjects, list) else None
         max_rows = dataset_cfg.get("max_rows_per_subject")
         max_rows_per_subject = int(max_rows) if max_rows else None
         downsample = dataset_cfg.get("downsample_factor")
         downsample_factor = int(downsample) if downsample else None
+        stress_include_amusement = bool(dataset_cfg.get("stress_include_amusement", True))
         return load_wesad_dataset(
-            dataset_path,
+            resolved_path,
             schema=schema,
             data_format=dataset_format,
             subjects=subject_list,
             max_rows_per_subject=max_rows_per_subject,
             downsample_factor=downsample_factor,
+            stress_include_amusement=stress_include_amusement,
         )
 
     if dataset_name == "csv":
