@@ -1,36 +1,53 @@
 # Cognitive Risk Forecasting Problem Definition
 
 ## Motivation
-Human–robot co-working on construction sites exposes workers to cognitive overload and stress while handling heavy equipment and unpredictable situations. Predicting near-future cognitive risk allows the robot supervisor to adjust task allocation, warn humans, or slow motion plans before unsafe states occur. Reliable forecasting must leverage multimodal physiology, interaction context, and personalized worker profiles because each individual reacts differently to workload and stressors.
+Human-robot co-working on construction sites can increase cognitive load and stress under heavy equipment operation and dynamic hazards. Predicting near-future risk enables a robot supervisor to adapt behavior before unsafe states escalate.
+
+Reliable forecasting must use:
+- multimodal physiology
+- interaction/context features
+- worker-specific personalization
 
 ## Objective
-We frame cognitive risk forecasting as a short-horizon probabilistic prediction task. Given the past `T` timesteps of physiological signals and contextual covariates, we estimate the probability that a worker will enter a high-risk cognitive state at `t + Δt`. Labels are derived from public stress datasets (WESAD-like) and treated as risk proxies for pretraining.
+Formulate cognitive risk forecasting as a short-horizon probabilistic prediction task.
+
+Given the past `T` timesteps of physiological and contextual covariates, estimate the probability that a worker enters a high-risk state at `t + delta_t`.
+
+In this repository, labels are stress/comfort proxies derived from WESAD-like data.
 
 ## Data Assumptions
-- **Physiology**: heart rate (hr), heart rate variability (hrv_rmssd), galvanic skin response (gsr).
-- **Context**: worker-to-robot distance, robot speed, hazard zone indicators.
-- **Meta**: worker profile attributes (experience, specialization).
-- **Schema**: tabular time-series with `time_idx`, `worker_id`, covariates, and `target` in `[0, 1]`.
+- Physiology: `ecg`, `eda`, `temp` (optional `resp`)
+- Context: `distance_to_robot`, `robot_speed`, optional hazard/phase indicators
+- Meta: worker attributes (experience, specialization)
+- Time-series schema: `time_idx`, `worker_id`, covariates, targets
 
 ## Worker Personalization
-Each worker owns a profile vector containing categorical attributes (experience level bucket, specialization id) and continuous baseline stats derived from an exponential moving average (EMA) of "safe" samples. The profile:
-```
+Each worker has profile features that can be used as static covariates and normalization context.
+
+Typical profile components:
+```text
 [experience_level, specialization_id,
- mu_hr, sigma_hr,
- mu_hrv, sigma_hrv,
- mu_gsr, sigma_gsr]
+ baseline_mu_signal..., baseline_sigma_signal...]
 ```
-Profiles are used twice:
-1. **Static covariates** for the Temporal Fusion Transformer.
-2. **Normalization context** for per-worker z-score scaling of physiological streams.
+
+Profiles are used for:
+1. static model features (optional)
+2. leakage-safe normalization of physiological streams
+
+## Leakage Safety Requirements
+- Fit profile baselines on train split only.
+- Apply train-fitted transformations to val/test.
+- Preserve chronological split constraints per worker.
+- Preserve disjoint subject sets when using subject-holdout mode.
 
 ## Modeling Scope
-1. **Baselines**: logistic regression on summary statistics, gated recurrent unit (GRU) forecaster on sequences.
-2. **Temporal Fusion Transformer**: multi-horizon forecasting with static covariates (worker profile), known future inputs (robot context), and observed inputs (physiology).
-3. **Calibration**: Expected Calibration Error (ECE) plus optional temperature scaling fitted on validation predictions.
+1. XGBoost baselines using engineered window features.
+2. Temporal Fusion Transformer for sequence forecasting.
+3. Calibration and threshold diagnostics for stress classification.
 
-## Deliverables
-- Deterministic preprocessing pipeline that transforms raw WESAD-like data stored under `data/raw/` into a normalized `data/processed/train.csv`.
-- Training scripts for baselines and TFT models with YAML-driven hyperparameters.
-- Evaluation utilities that report AUROC, AUPRC, and calibration metrics.
-- Documentation and notebooks describing exploratory analysis and TFT prototyping steps.
+## Deliverables In This Repository
+- Deterministic preprocessing and split/windowing pipeline.
+- Config-driven training (`src/config/*.yaml`).
+- Metrics and diagnostics written per run to `experiments/runs/<timestamp>/`.
+- Plots and markdown summaries for comparison/reporting.
+- Reproducible scripts for sanity checks, dataset debugging, and pilot runs.

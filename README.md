@@ -1,28 +1,46 @@
 # Twin Psych Risk Model: XGBoost vs TFT
 
-This repo trains and compares XGBoost and Temporal Fusion Transformer (TFT) for short-horizon risk forecasting from multimodal time-series, with leak-safe worker personalization.
+This repository trains and compares XGBoost and Temporal Fusion Transformer (TFT) for short-horizon cognitive risk forecasting from multimodal time series, with leakage-safe worker personalization.
 
-## Run
+## Quick Start
+
+### 1) Environment
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### 2) Fast sanity check
+```bash
+python scripts/sanity_check.py
+```
+
+### 3) End-to-end run
 ```bash
 python -m src.run_experiment --config src/config/default.yaml
 ```
 
-Artifacts are saved under `experiments/runs/<timestamp>/`:
+## Run Artifacts
+Each run writes to `experiments/runs/<timestamp>/`:
 - `metrics.json`
 - `results.md`
 - `config_resolved.yaml`
+- `profile_feature_stats.json`
+- `numeric_feature_stats.json`
+- `engineered_feature_stats.json`
 - `models/*`
 - `plots/*.png`
 - `processed/windows_*.npy`, `processed/meta.csv`, `processed/splits.csv`, `processed/tft_flat.csv`
 
-## Datasets
-Configured via `dataset` in `src/config/default.yaml`.
-- `dataset.name: wesad | synthetic | csv`
-- `dataset.source: local | kaggle_api` (WESAD only)
-- `dataset.path`: local path to dataset root/file (for `source: local`)
-- `dataset.format: auto | wesad_pickle | csv`
-- `dataset.kaggle_dataset`: Kaggle dataset id (for `source: kaggle_api`)
-- `dataset.kaggle_cache_dir`: where downloaded Kaggle files are extracted
+## Dataset Configuration
+Configured under `dataset` in `src/config/default.yaml`.
+- `dataset.name`: `wesad | synthetic | csv`
+- `dataset.source`: `local | kaggle_api` (WESAD only)
+- `dataset.path`: local dataset path for `source: local`
+- `dataset.format`: `auto | wesad_pickle | csv`
+- `dataset.kaggle_dataset`: Kaggle dataset id for `source: kaggle_api`
+- `dataset.kaggle_cache_dir`: extraction/cache location for Kaggle downloads
 
 WESAD loader supports:
 - native `S*/S*.pkl`
@@ -37,33 +55,31 @@ dataset:
   kaggle_cache_dir: data/raw/wesad_kaggle
   format: auto
 ```
-This requires Kaggle credentials (`~/.kaggle/kaggle.json` or `KAGGLE_USERNAME`/`KAGGLE_KEY`).
+Credentials are required via `~/.kaggle/kaggle.json` or `KAGGLE_USERNAME` / `KAGGLE_KEY`.
 
-Unified columns include:
-- `timestamp`, `time_idx`, `worker_id`
-- `ecg`, `eda`, `temp` (optional `resp`)
-- `distance_to_robot`, `robot_speed`, `hazard_zone`, `task_phase`
-- `protocol_label`, `y_stress`, `y_comfort_proxy`
+Config behavior:
+- `src/config/default.yaml` is the base config.
+- Passing `--config <other.yaml>` applies a deep override on top of defaults.
 
 ## Targets
 - Stress classification: `y_stress`
 - Comfort regression proxy: `y_comfort_proxy`
 
-Default is multi-head enabled (both tasks in one run).
+Multi-head training is enabled by default (`targets.multi_head.enabled: true`).
 
-## Leakage-safe profiles
-Worker EMA baselines are fit on **train split only**:
-1. split chronologically per worker
-2. fit profiles on train only
-3. transform train/val/test using train-fitted profiles
+## Leakage-Safe Profile Handling
+Worker EMA baselines are fit on train split only:
+1. Split chronologically per worker (or disjoint subject holdout).
+2. Fit profile baselines using train data only.
+3. Transform train/val/test with train-fitted statistics.
 
-You can disable profile features using:
+Disable profile features via:
 ```yaml
 profiles:
   enabled: false
 ```
 
-## Window and horizon controls
+## Core Controls
 ```yaml
 task:
   window_length: 60
@@ -71,26 +87,36 @@ task:
   sampling_rate_hz: 4.0
 ```
 
-## Notes
-- Run is CPU-friendly by default (`tft.max_epochs: 3` + early stopping).
-- If one model fails, the run still completes and records the error in `metrics.json`.
-
-## WESAD pilot (8 subjects)
-Prepare a local 8-subject subset from Kaggle-hosted WESAD:
+## WESAD Pilot (8 Subjects)
+Prepare a local subset:
 ```bash
 python scripts/prepare_wesad_subset.py --subjects "S2,S3,S4,S5,S6,S7,S8,S9"
 ```
 
-Run pilot with profiles enabled:
+Run profiles on/off:
 ```bash
 python -m src.run_experiment --config src/config/wesad_pilot_8subj.yaml
-```
-
-Run pilot with profiles disabled:
-```bash
 python -m src.run_experiment --config src/config/wesad_pilot_8subj_no_profiles.yaml
 ```
 
-Convenience scripts:
+Convenience wrappers:
 - `scripts/run_wesad_pilot.sh`
 - `scripts/run_wesad_pilot.bat`
+
+## Documentation
+- Agent operating contract: `AGENTS.md`
+- Problem framing: `docs/problem_definition.md`
+- Experiment workflow and improvement loop: `docs/experimentation_workflow.md`
+- Historical run notes: `docs/weekly_reports/`
+
+## Code Quality
+Optional linting with Ruff:
+```bash
+pip install ruff
+ruff check src scripts
+```
+Project lint settings live in `pyproject.toml`.
+
+## Notes
+- Default config is CPU-friendly (`tft.max_epochs: 3` with early stopping).
+- If one model fails, the pipeline still completes and records the failure in `metrics.json`.

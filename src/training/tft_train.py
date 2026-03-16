@@ -195,6 +195,7 @@ def train_tft_task(
         callbacks=callbacks,
         accelerator=accelerator,
         devices=max(1, devices),
+        default_root_dir=str(run_dir),
         logger=False,
         enable_checkpointing=True,
     )

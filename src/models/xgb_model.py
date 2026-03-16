@@ -52,8 +52,6 @@ def train_xgboost(
     )
     if "tree_method" in params:
         common_params["tree_method"] = params.get("tree_method")
-    if "predictor" in params:
-        common_params["predictor"] = params.get("predictor")
 
     if task_type == "classification":
         unique = np.unique(y_train)
@@ -77,7 +75,7 @@ def train_xgboost(
         except (TypeError, ValueError):
             # Fall back for older xgboost versions without early_stopping_rounds or gpu_hist support.
             if common_params.get("tree_method") == "gpu_hist":
-                model.set_params(tree_method="hist", predictor="auto")
+                model.set_params(tree_method="hist")
             model.fit(X_train, y_train)
     else:
         model = xgb.XGBRegressor(
@@ -95,7 +93,7 @@ def train_xgboost(
             )
         except (TypeError, ValueError):
             if common_params.get("tree_method") == "gpu_hist":
-                model.set_params(tree_method="hist", predictor="auto")
+                model.set_params(tree_method="hist")
             model.fit(X_train, y_train)
 
     calibrator = None

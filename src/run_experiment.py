@@ -32,7 +32,7 @@ from .training.plotting import (
 )
 from .training.tft_train import train_tft_task
 from .training.xgb_train import train_xgb_tasks
-from .utils.io import load_yaml, save_json
+from .utils.io import load_merged_yaml, load_yaml, save_json
 from .utils.logging import setup_logger
 from .utils.paths import create_run_dir
 from .utils.seed import seed_everything
@@ -423,7 +423,11 @@ def _write_results_md(
 
 
 def run_experiment(config_path: str) -> Path:
-    cfg = load_yaml(config_path)
+    default_cfg_path = Path(__file__).resolve().parent / "config" / "default.yaml"
+    if Path(config_path).resolve() == default_cfg_path.resolve():
+        cfg = load_yaml(config_path)
+    else:
+        cfg = load_merged_yaml(default_cfg_path, config_path)
     logger = setup_logger()
     seed_everything(int(cfg.get("reproducibility", {}).get("seed", cfg["split"]["seed"])))
     schema = DataSchema.from_config(cfg)

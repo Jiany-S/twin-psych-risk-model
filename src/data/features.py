@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Sequence
+import warnings
 
 import numpy as np
 from scipy.signal import find_peaks, welch
@@ -98,7 +97,9 @@ def impute_with_train_statistics(
     train = X_train.copy()
     val = X_val.copy()
     test = X_test.copy()
-    med = np.nanmedian(train, axis=0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        med = np.nanmedian(train, axis=0)
     med = np.where(np.isnan(med), 0.0, med)
     for arr in (train, val, test):
         mask = np.isnan(arr)
