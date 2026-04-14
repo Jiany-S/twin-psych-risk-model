@@ -37,7 +37,9 @@ Thumbs.db
 *.zip
 
 data/raw/*.csv
-data/raw/wesad_subset/
+data/wesad/wesad_subset/
+data/wesad/wesad_kaggle/
+data/multiphysio/features/
 data/processed/*
 !data/processed/.gitkeep
 !data/raw/.gitkeep

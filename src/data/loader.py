@@ -8,6 +8,7 @@ from typing import Mapping
 import pandas as pd
 
 from .kaggle_api import fetch_kaggle_dataset
+from .load_multiphysio import load_multiphysio_dataset
 from .load_wesad import load_wesad_dataset
 from .schema import DataSchema
 from .synthetic import generate_synthetic_dataset
@@ -93,6 +94,14 @@ def load_or_generate(cfg: Mapping[str, object], schema: DataSchema) -> pd.DataFr
             else:
                 dataset_path = raw_dir
         return _load_generic_csv(Path(dataset_path), schema=schema)
+
+    if dataset_name == "multiphysio":
+        if not dataset_path:
+            raise FileNotFoundError("dataset.path is required when dataset.name is 'multiphysio'.")
+        multiphysio_cfg = dataset_cfg.get("multiphysio", {})
+        if not isinstance(multiphysio_cfg, Mapping):
+            multiphysio_cfg = {}
+        return load_multiphysio_dataset(Path(dataset_path), schema=schema, dataset_cfg=dict(multiphysio_cfg))
 
     # synthetic default/fallback
     synth_cfg = cfg.get("synthetic", {})

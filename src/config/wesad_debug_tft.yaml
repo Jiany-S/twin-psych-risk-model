@@ -7,7 +7,7 @@ dataset:
   name: wesad
   source: local
   report_name: WESAD debug TFT
-  path: data/raw/wesad_subset
+  path: data/wesad/wesad_subset
   format: auto
   subjects: ["S2"]
   downsample_factor: 20

@@ -4,23 +4,26 @@ paths:
   run_root: experiments/runs
 
 dataset:
-  name: wesad
-  source: kaggle_api
-  kaggle_dataset: orvile/wesad-wearable-stress-affect-detection-dataset
-  kaggle_cache_dir: data/wesad/wesad_kaggle
-  kaggle_force_download: false
-  format: auto
-  subjects: ["S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"]
-  downsample_factor: 10
-  max_rows_per_subject: 10000
-  stress_include_amusement: true
+  name: multiphysio
+  report_name: MultiPhysio-HRC (bio 60s features)
+  path: data/multiphysio
+  multiphysio:
+    ecg_col: HRV_MeanNN
+    eda_col: EDA_mean
+    temp_col: EMG_RMSE
+    resp_col: RRV_MeanBB
+    repetition_offset: 1
+    min_rows_per_worker: 40
+    stress_label_col: NASA
+    stress_threshold: 40.0
+    comfort_label_col: Valence
 
 reproducibility:
   seed: 42
 
 targets:
   multi_head:
-    enabled: false
+    enabled: true
   stress:
     label_col: y_stress
   comfort:
@@ -28,24 +31,19 @@ targets:
 
 task:
   horizon_steps: 1
-  window_length: 20
-  sampling_rate_hz: 4.0
-  window_step: 5
+  window_length: 8
+  sampling_rate_hz: 0.0166667  # 60-second feature windows
+  window_step: 1
 
 split:
-  mode: subject_holdout
-  train_subjects: ["S2", "S3", "S4", "S5", "S6"]
-  val_subjects: ["S7"]
-  test_subjects: ["S8", "S9"]
+  mode: time
   train_ratio: 0.7
   val_ratio: 0.15
   test_ratio: 0.15
   seed: 42
 
 profiles:
-  enabled: true
-  mode: online
-  warmup_steps: 60
+  enabled: false
   use_static_meta: false
 
 features:
@@ -69,11 +67,11 @@ features:
 
 models:
   run_xgb: true
-  run_tft: true
+  run_tft: false
 
 xgboost:
   max_depth: 4
-  n_estimators: 80
+  n_estimators: 120
   learning_rate: 0.05
   subsample: 0.9
   colsample_bytree: 0.9
@@ -81,22 +79,19 @@ xgboost:
   calibration: isotonic
   tree_method: auto
   predictor: auto
-  threshold_policy: f1
-  target_recall: 0.7
 
 tft:
   strategy: multi_model
-  max_epochs: 1
-  hidden_size: 24
+  max_epochs: 2
+  hidden_size: 16
   lstm_layers: 1
   dropout: 0.1
-  batch_size: 256
+  batch_size: 64
   num_workers: 0
-  gpus: 1
-  early_stop_patience: 1
+  gpus: 0
+  early_stop_patience: 2
   learning_rate: 1.0e-3
   tft_loss: quantile
 
 report:
   top_k_features: 15
-

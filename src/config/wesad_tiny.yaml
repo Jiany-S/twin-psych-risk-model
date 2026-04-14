@@ -7,7 +7,7 @@ dataset:
   name: wesad
   source: local
   report_name: WESAD tiny (2 subjects)
-  path: data/raw/wesad_subset
+  path: data/wesad/wesad_subset
   format: auto
   subjects: ["S2"]
   max_rows_per_subject: 20000

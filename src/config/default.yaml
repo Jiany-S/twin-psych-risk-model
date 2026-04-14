@@ -4,12 +4,12 @@ paths:
   run_root: experiments/runs
 
 dataset:
-  name: synthetic   # wesad | synthetic | csv
+  name: synthetic   # wesad | multiphysio | synthetic | csv
   source: local     # local | kaggle_api (wesad only)
   path: data/raw
   format: auto      # auto | wesad_pickle | csv
   kaggle_dataset: orvile/wesad-wearable-stress-affect-detection-dataset
-  kaggle_cache_dir: data/raw/wesad_kaggle
+  kaggle_cache_dir: data/wesad/wesad_kaggle
   kaggle_force_download: false
 
 reproducibility:

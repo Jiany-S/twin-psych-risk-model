@@ -48,7 +48,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=str,
-        default="data/raw/wesad_subset",
+        default="data/wesad/wesad_subset",
         help="Output directory for copied subset.",
     )
     parser.add_argument(

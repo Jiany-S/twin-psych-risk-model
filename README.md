@@ -35,7 +35,7 @@ Each run writes to `experiments/runs/<timestamp>/`:
 
 ## Dataset Configuration
 Configured under `dataset` in `src/config/default.yaml`.
-- `dataset.name`: `wesad | synthetic | csv`
+- `dataset.name`: `wesad | multiphysio | synthetic | csv`
 - `dataset.source`: `local | kaggle_api` (WESAD only)
 - `dataset.path`: local dataset path for `source: local`
 - `dataset.format`: `auto | wesad_pickle | csv`
@@ -52,10 +52,25 @@ dataset:
   name: wesad
   source: kaggle_api
   kaggle_dataset: orvile/wesad-wearable-stress-affect-detection-dataset
-  kaggle_cache_dir: data/raw/wesad_kaggle
+  kaggle_cache_dir: data/wesad/wesad_kaggle
   format: auto
 ```
 Credentials are required via `~/.kaggle/kaggle.json` or `KAGGLE_USERNAME` / `KAGGLE_KEY`.
+
+MultiPhysio loader example:
+```yaml
+dataset:
+  name: multiphysio
+  path: data/multiphysio
+  multiphysio:
+    ecg_col: HRV_MeanNN
+    eda_col: EDA_mean
+    temp_col: EMG_RMSE
+    repetition_offset: 1
+    stress_label_col: NASA
+    stress_threshold: 40.0
+    comfort_label_col: Valence
+```
 
 Config behavior:
 - `src/config/default.yaml` is the base config.
@@ -102,6 +117,17 @@ python -m src.run_experiment --config src/config/wesad_pilot_8subj_no_profiles.y
 Convenience wrappers:
 - `scripts/run_wesad_pilot.sh`
 - `scripts/run_wesad_pilot.bat`
+
+## Data Layout
+- `data/wesad/`: WESAD data (`wesad_subset/`, optional `wesad_kaggle/`)
+- `data/multiphysio/`: MultiPhysio-HRC docs and feature tables
+- `data/raw/`: synthetic/default raw CSV fallback
+
+## MultiPhysio Debug
+```bash
+python scripts/debug_multiphysio_dataset.py --config src/config/multiphysio_debug.yaml
+python -m src.run_experiment --config src/config/multiphysio_debug.yaml
+```
 
 ## Documentation
 - Agent operating contract: `AGENTS.md`
