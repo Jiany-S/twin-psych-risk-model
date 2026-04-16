@@ -33,32 +33,24 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _round_robin_fill(
-    candidates: list[str], groups: dict[str, list[str]], target_counts: dict[str, int], rng: np.random.Generator
-) -> None:
-    if not candidates:
-        return
-    pool = candidates.copy()
-    rng.shuffle(pool)
-    for worker in pool:
-        # fill the most under-target split first
-        deficits = {
-            name: target_counts[name] - len(groups[name])
-            for name in ("train", "val", "test")
-        }
-        order = sorted(deficits, key=lambda n: deficits[n], reverse=True)
-        groups[order[0]].append(worker)
-
-
-def _build_subject_holdout(frame, schema: DataSchema, seed: int, train_ratio: float, val_ratio: float) -> dict[str, list[str]]:
+def _build_subject_holdout(
+    frame,
+    schema: DataSchema,
+    seed: int,
+    train_ratio: float,
+    val_ratio: float,
+    min_val_positive_windows: int,
+    min_test_positive_windows: int,
+) -> tuple[dict[str, list[str]], dict[str, dict[str, int]]]:
     stats = (
         frame.groupby(schema.worker_id, observed=True)[schema.stress_target]
         .agg(["size", "sum"])
         .reset_index()
     )
     stats[schema.worker_id] = stats[schema.worker_id].astype(str)
-    positives = sorted(stats.loc[stats["sum"] > 0, schema.worker_id].tolist())
-    negatives = sorted(stats.loc[stats["sum"] <= 0, schema.worker_id].tolist())
+    stats["sum"] = stats["sum"].astype(int)
+    stats["size"] = stats["size"].astype(int)
+    stats["neg"] = stats["size"] - stats["sum"]
     workers = sorted(stats[schema.worker_id].tolist())
     n_workers = len(workers)
     if n_workers < 9:
@@ -74,27 +66,83 @@ def _build_subject_holdout(frame, schema: DataSchema, seed: int, train_ratio: fl
     while target_train + target_val + target_test < n_workers:
         target_train += 1
 
+    total_pos = int(stats["sum"].sum())
+    total_rows = int(stats["size"].sum())
+    target_pos = {
+        "train": max(1, int(round(total_pos * train_ratio))),
+        "val": max(min_val_positive_windows, int(round(total_pos * val_ratio))),
+        "test": max(min_test_positive_windows, total_pos - int(round(total_pos * train_ratio)) - int(round(total_pos * val_ratio))),
+    }
+    # Keep positives feasible.
+    if target_pos["train"] + target_pos["val"] + target_pos["test"] > total_pos:
+        overflow = target_pos["train"] + target_pos["val"] + target_pos["test"] - total_pos
+        target_pos["train"] = max(1, target_pos["train"] - overflow)
+
+    target_rows = {
+        "train": max(1, int(round(total_rows * train_ratio))),
+        "val": max(1, int(round(total_rows * val_ratio))),
+        "test": max(1, total_rows - int(round(total_rows * train_ratio)) - int(round(total_rows * val_ratio))),
+    }
     groups: dict[str, list[str]] = {"train": [], "val": [], "test": []}
-    split_names = ["train", "val", "test"]
-    rng.shuffle(split_names)
-
-    # Guarantee at least one positive and one negative per split when possible.
-    if len(positives) >= 3:
-        pos = positives.copy()
-        rng.shuffle(pos)
-        for idx, name in enumerate(split_names):
-            groups[name].append(pos[idx])
-        positives = [w for w in pos[3:]]
-    if len(negatives) >= 3:
-        neg = negatives.copy()
-        rng.shuffle(neg)
-        for idx, name in enumerate(split_names):
-            groups[name].append(neg[idx])
-        negatives = [w for w in neg[3:]]
-
+    assigned = {"train": {"pos": 0, "rows": 0}, "val": {"pos": 0, "rows": 0}, "test": {"pos": 0, "rows": 0}}
     targets = {"train": target_train, "val": target_val, "test": target_test}
-    _round_robin_fill(positives, groups, targets, rng)
-    _round_robin_fill(negatives, groups, targets, rng)
+    worker_meta = {
+        str(row[schema.worker_id]): {"pos": int(row["sum"]), "rows": int(row["size"])}
+        for _, row in stats.iterrows()
+    }
+
+    # Sort by descending positives, then rows, to place high-signal workers first.
+    ordered = sorted(
+        workers,
+        key=lambda w: (worker_meta[w]["pos"], worker_meta[w]["rows"]),
+        reverse=True,
+    )
+    for w in ordered:
+        candidates = [s for s in ("train", "val", "test") if len(groups[s]) < targets[s]]
+        if not candidates:
+            candidates = ["train", "val", "test"]
+        wp = worker_meta[w]["pos"]
+        wr = worker_meta[w]["rows"]
+
+        def score(split: str) -> float:
+            after_pos = assigned[split]["pos"] + wp
+            after_rows = assigned[split]["rows"] + wr
+            after_n = len(groups[split]) + 1
+            pos_term = abs(after_pos - target_pos[split]) / max(1, target_pos[split])
+            rows_term = abs(after_rows - target_rows[split]) / max(1, target_rows[split])
+            n_term = abs(after_n - targets[split]) / max(1, targets[split])
+            # bias val/test to avoid starving positives in calibration/evaluation splits
+            boost = -0.15 if split in {"val", "test"} and wp > 0 else 0.0
+            return 1.0 * pos_term + 0.5 * rows_term + 0.5 * n_term + boost
+
+        best = sorted(candidates, key=score)[0]
+        groups[best].append(w)
+        assigned[best]["pos"] += wp
+        assigned[best]["rows"] += wr
+
+    # Repair loop to enforce minimum positive windows in val/test.
+    def split_pos(name: str) -> int:
+        return int(sum(worker_meta[w]["pos"] for w in groups[name]))
+
+    def split_rows(name: str) -> int:
+        return int(sum(worker_meta[w]["rows"] for w in groups[name]))
+
+    for target_split, min_pos in (("val", min_val_positive_windows), ("test", min_test_positive_windows)):
+        guard = 0
+        while split_pos(target_split) < min_pos and guard < 200:
+            guard += 1
+            donor_candidates = sorted(groups["train"], key=lambda w: worker_meta[w]["pos"], reverse=True)
+            receiver_candidates = sorted(groups[target_split], key=lambda w: worker_meta[w]["pos"])
+            if not donor_candidates or not receiver_candidates:
+                break
+            donor = donor_candidates[0]
+            receiver = receiver_candidates[0]
+            if worker_meta[donor]["pos"] <= worker_meta[receiver]["pos"]:
+                break
+            groups["train"].remove(donor)
+            groups[target_split].append(donor)
+            groups[target_split].remove(receiver)
+            groups["train"].append(receiver)
 
     # Final deterministic normalization.
     for name in groups:
@@ -108,16 +156,35 @@ def _build_subject_holdout(frame, schema: DataSchema, seed: int, train_ratio: fl
         missing = sorted(set(workers) - set(all_assigned))
         extra = sorted(set(all_assigned) - set(workers))
         raise RuntimeError(f"Split construction mismatch. Missing={missing}, Extra={extra}")
-    return groups
+    split_stats = {
+        name: {
+            "subjects": int(len(groups[name])),
+            "rows": split_rows(name),
+            "positives": split_pos(name),
+        }
+        for name in ("train", "val", "test")
+    }
+    return groups, split_stats
 
 
-def _assert_split_class_coverage(frame, schema: DataSchema, split_subjects: dict[str, list[str]]) -> None:
+def _assert_split_class_coverage(
+    frame,
+    schema: DataSchema,
+    split_subjects: dict[str, list[str]],
+    min_val_positive_windows: int,
+    min_test_positive_windows: int,
+) -> None:
     for name in ("train", "val", "test"):
         ids = set(split_subjects[name])
         part = frame[frame[schema.worker_id].astype(str).isin(ids)]
         labels = set(part[schema.stress_target].astype(float).unique().tolist())
         if 0.0 not in labels or 1.0 not in labels:
             raise ValueError(f"{name} split is single-class under current assignment: labels={sorted(labels)}")
+        positives = int(part[schema.stress_target].sum())
+        if name == "val" and positives < min_val_positive_windows:
+            raise ValueError(f"val split positives too low: {positives} < {min_val_positive_windows}")
+        if name == "test" and positives < min_test_positive_windows:
+            raise ValueError(f"test split positives too low: {positives} < {min_test_positive_windows}")
 
 
 def main() -> None:
@@ -132,9 +199,25 @@ def main() -> None:
     seed = int(cfg.get("reproducibility", {}).get("seed", split_cfg.get("seed", 42)))
     train_ratio = float(split_cfg.get("train_ratio", 0.7))
     val_ratio = float(split_cfg.get("val_ratio", 0.15))
+    min_val_positive_windows = int(split_cfg.get("min_val_positive_windows", 20))
+    min_test_positive_windows = int(split_cfg.get("min_test_positive_windows", 20))
 
-    subjects = _build_subject_holdout(frame, schema, seed=seed, train_ratio=train_ratio, val_ratio=val_ratio)
-    _assert_split_class_coverage(frame, schema, subjects)
+    subjects, split_stats = _build_subject_holdout(
+        frame,
+        schema,
+        seed=seed,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        min_val_positive_windows=min_val_positive_windows,
+        min_test_positive_windows=min_test_positive_windows,
+    )
+    _assert_split_class_coverage(
+        frame,
+        schema,
+        subjects,
+        min_val_positive_windows=min_val_positive_windows,
+        min_test_positive_windows=min_test_positive_windows,
+    )
 
     cfg["dataset"]["subjects"] = sorted(frame[schema.worker_id].astype(str).unique().tolist())
     cfg["split"]["mode"] = "subject_holdout"
@@ -161,6 +244,7 @@ def main() -> None:
     print(f"Full MultiPhysio run completed: {run_dir}")
     print(f"Resolved config: {resolved_path.resolve()}")
     print(f"Split subjects: train={len(subjects['train'])} val={len(subjects['val'])} test={len(subjects['test'])}")
+    print(f"Split stats (rows/positives): {split_stats}")
     print(f"Test class balance: {test_balance}")
     print(f"XGBoost stress AUROC: {metrics.get('xgboost', {}).get('stress', {}).get('auroc')}")
     print(f"TFT stress AUROC: {metrics.get('tft', {}).get('stress', {}).get('auroc')}")

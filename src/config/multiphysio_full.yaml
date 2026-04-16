@@ -44,6 +44,8 @@ split:
   train_ratio: 0.7
   val_ratio: 0.15
   test_ratio: 0.15
+  min_val_positive_windows: 20
+  min_test_positive_windows: 20
   seed: 42
 
 profiles:
