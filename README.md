@@ -139,6 +139,16 @@ Convenience wrappers:
 - `scripts/run_multiphysio_smoke.sh`
 - `scripts/run_multiphysio_smoke.bat`
 
+## MultiPhysio Full Training
+Run full training with deterministic subject-holdout split construction (both models):
+```bash
+python scripts/run_multiphysio_full.py --config src/config/multiphysio_full.yaml
+```
+
+Convenience wrappers:
+- `scripts/run_multiphysio_full.sh`
+- `scripts/run_multiphysio_full.bat`
+
 ## Documentation
 - Agent operating contract: `AGENTS.md`
 - Problem framing: `docs/problem_definition.md`

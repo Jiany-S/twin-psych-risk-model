@@ -1,0 +1,107 @@
+paths:
+  raw_dir: data/raw
+  raw_file: data/raw/data.csv
+  run_root: experiments/runs
+
+dataset:
+  name: multiphysio
+  report_name: MultiPhysio-HRC (full)
+  path: data/multiphysio
+  multiphysio:
+    ecg_col: HRV_MeanNN
+    eda_col: EDA_mean
+    temp_col: EMG_RMSE
+    resp_col: RRV_MeanBB
+    repetition_offset: 1
+    min_rows_per_worker: 40
+    stress_label_col: NASA
+    stress_threshold: 40.0
+    comfort_label_col: Valence
+
+reproducibility:
+  seed: 42
+
+targets:
+  multi_head:
+    enabled: true
+  stress:
+    label_col: y_stress
+  comfort:
+    label_col: y_comfort_proxy
+
+task:
+  horizon_steps: 1
+  window_length: 10
+  sampling_rate_hz: 0.0166667
+  window_step: 1
+
+split:
+  mode: subject_holdout
+  # Auto-populated by scripts/run_multiphysio_full.py to keep class coverage stable.
+  train_subjects: []
+  val_subjects: []
+  test_subjects: []
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  seed: 42
+
+profiles:
+  enabled: false
+  use_static_meta: false
+
+features:
+  timestamp: timestamp
+  time_idx: time_idx
+  worker_id: worker_id
+  protocol_label: protocol_label
+  physiology: [ecg, eda, temp]
+  use_robot_context: false
+  robot_context: [distance_to_robot, robot_speed]
+  optional:
+    hazard_zone: hazard_zone
+    task_phase: task_phase
+    specialization_col: specialization_index
+    experience_col: experience_level
+  hrv:
+    include_freq_domain: false
+  eda:
+    scr_threshold: 0.05
+    min_scr_distance: 3
+
+models:
+  run_xgb: true
+  run_tft: true
+
+xgboost:
+  max_depth: 5
+  n_estimators: 300
+  learning_rate: 0.03
+  subsample: 0.9
+  colsample_bytree: 0.9
+  early_stopping_rounds: 30
+  calibration: isotonic
+  tree_method: auto
+  predictor: auto
+
+tft:
+  strategy: multi_model
+  max_epochs: 12
+  hidden_size: 24
+  lstm_layers: 1
+  dropout: 0.1
+  batch_size: 64
+  num_workers: 0
+  gpus: 0
+  early_stop_patience: 3
+  learning_rate: 1.0e-3
+  tft_loss: quantile
+
+thresholding:
+  policy: f1
+  min_pred_rate: 0.02
+  max_pred_rate: 0.98
+  allow_pathological: false
+
+report:
+  top_k_features: 20
