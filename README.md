@@ -129,6 +129,16 @@ python scripts/debug_multiphysio_dataset.py --config src/config/multiphysio_debu
 python -m src.run_experiment --config src/config/multiphysio_debug.yaml
 ```
 
+## MultiPhysio Smoke (Both Models)
+Run a small subject-holdout smoke test that asserts both XGBoost and TFT complete:
+```bash
+python scripts/run_multiphysio_smoke.py --config src/config/multiphysio_smoke.yaml
+```
+
+Convenience wrappers:
+- `scripts/run_multiphysio_smoke.sh`
+- `scripts/run_multiphysio_smoke.bat`
+
 ## Documentation
 - Agent operating contract: `AGENTS.md`
 - Problem framing: `docs/problem_definition.md`

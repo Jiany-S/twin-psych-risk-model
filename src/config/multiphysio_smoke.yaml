@@ -1,0 +1,160 @@
+paths:
+  raw_dir: data/raw
+  raw_file: data/raw/data.csv
+  run_root: experiments/runs
+
+dataset:
+  name: multiphysio
+  report_name: MultiPhysio-HRC (smoke)
+  path: data/multiphysio
+  subjects:
+    [
+      "1005",
+      "1007",
+      "1008",
+      "10000",
+      "10001",
+      "1030",
+      "1031",
+      "1032",
+      "1034",
+      "1036",
+      "1037",
+      "1038",
+      "1039",
+      "1041",
+      "1043",
+      "1045",
+      "1050",
+      "1051",
+      "1053",
+      "1055",
+      "1056",
+      "1057",
+      "1062",
+      "1063",
+      "1065",
+      "1066",
+      "1067",
+      "1075",
+      "10869",
+      "1090",
+      "10978",
+    ]
+  multiphysio:
+    ecg_col: HRV_MeanNN
+    eda_col: EDA_mean
+    temp_col: EMG_RMSE
+    resp_col: RRV_MeanBB
+    repetition_offset: 1
+    min_rows_per_worker: 40
+    stress_label_col: NASA
+    stress_threshold: 40.0
+    comfort_label_col: Valence
+
+reproducibility:
+  seed: 42
+
+targets:
+  multi_head:
+    enabled: false
+  stress:
+    label_col: y_stress
+  comfort:
+    label_col: y_comfort_proxy
+
+task:
+  horizon_steps: 1
+  window_length: 6
+  sampling_rate_hz: 0.0166667
+  window_step: 1
+
+split:
+  mode: subject_holdout
+  train_subjects:
+    [
+      "1005",
+      "1007",
+      "10001",
+      "1031",
+      "1034",
+      "1037",
+      "1038",
+      "1039",
+      "1043",
+      "1045",
+      "1050",
+      "1053",
+      "1055",
+      "1056",
+      "1057",
+      "1062",
+      "1063",
+      "1065",
+      "1066",
+      "1067",
+      "1075",
+      "10869",
+      "1090",
+      "10978",
+    ]
+  val_subjects: ["1032", "1008", "1051"]
+  test_subjects: ["1041", "1030", "10000"]
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  seed: 42
+
+profiles:
+  enabled: false
+  use_static_meta: false
+
+features:
+  timestamp: timestamp
+  time_idx: time_idx
+  worker_id: worker_id
+  protocol_label: protocol_label
+  physiology: [ecg, eda, temp]
+  use_robot_context: false
+  robot_context: [distance_to_robot, robot_speed]
+  optional:
+    hazard_zone: hazard_zone
+    task_phase: task_phase
+    specialization_col: specialization_index
+    experience_col: experience_level
+  hrv:
+    include_freq_domain: false
+  eda:
+    scr_threshold: 0.05
+    min_scr_distance: 3
+
+models:
+  run_xgb: true
+  run_tft: true
+
+xgboost:
+  max_depth: 4
+  n_estimators: 100
+  learning_rate: 0.05
+  subsample: 0.9
+  colsample_bytree: 0.9
+  early_stopping_rounds: 20
+  calibration: isotonic
+  tree_method: auto
+  predictor: auto
+
+tft:
+  strategy: multi_model
+  max_epochs: 2
+  hidden_size: 16
+  lstm_layers: 1
+  dropout: 0.1
+  batch_size: 64
+  num_workers: 0
+  gpus: 0
+  early_stop_patience: 1
+  learning_rate: 1.0e-3
+  tft_loss: quantile
+
+report:
+  top_k_features: 15
