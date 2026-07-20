@@ -20,8 +20,14 @@ targets:
     enabled: true
   stress:
     label_col: y_stress
+    task_type: classification
   comfort:
     label_col: y_comfort_proxy
+    task_type: regression
+
+experiment:
+  primary_target: stress
+  task_name: stress classification
 
 task:
   horizon_steps: 5
@@ -48,6 +54,7 @@ features:
   worker_id: worker_id
   protocol_label: protocol_label
   physiology: [ecg, eda, temp]
+  engineering_mode: raw_signals
   robot_context: [distance_to_robot, robot_speed]
   optional:
     hazard_zone: hazard_zone

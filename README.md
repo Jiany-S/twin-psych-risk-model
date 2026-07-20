@@ -62,25 +62,67 @@ MultiPhysio loader example:
 dataset:
   name: multiphysio
   path: data/multiphysio
+  report_name: MultiPhysio-HRC cognitive workload benchmark
   multiphysio:
-    ecg_col: HRV_MeanNN
-    eda_col: EDA_mean
-    temp_col: EMG_RMSE
-    repetition_offset: 1
-    stress_label_col: NASA
-    stress_threshold: 40.0
-    comfort_label_col: Valence
+    feature_columns:
+      hrv_mean_nn: HRV_MeanNN
+      eda_mean: EDA_mean
+      emg_rmse: EMG_RMSE
+      rrv_mean_bb: RRV_MeanBB
+
+features:
+  physiology: [hrv_mean_nn, eda_mean, emg_rmse, rrv_mean_bb]
+  engineering_mode: precomputed
+
+experiment:
+  primary_target: cognitive_load_binary
+
+targets:
+  stress:
+    source_col: STAI
+    source_questionnaire: STAI-Y1
+    source_range: [20, 80]
+    task_type: regression
+  cognitive_load_binary:
+    source_col: NASA
+    source_questionnaire: NASA-TLX
+    source_range: [0, 100]
+    task_type: classification
+    threshold: 40.0
+  comfort:
+    source_col: Valence
+    source_questionnaire: SAM Valence
+    source_range: [1, 5]
+    task_type: regression
+  arousal:
+    source_col: Arousal
+    source_questionnaire: SAM Arousal
+    source_range: [1, 5]
+    task_type: regression
 ```
+
+MultiPhysio `bio_features_60s.csv` contains precomputed 60-second features, not raw physiological waveforms. NASA-TLX is modeled as cognitive workload; it is not silently used as stress. EMG remains `emg_rmse` and is not mapped to temperature.
 
 Config behavior:
 - `src/config/default.yaml` is the base config.
 - Passing `--config <other.yaml>` applies a deep override on top of defaults.
 
 ## Targets
-- Stress classification: `y_stress`
+- Configured primary classification target: `experiment.primary_target`
+- WESAD stress classification: `y_stress`
+- MultiPhysio STAI stress/state-anxiety regression: `y_stress`
+- MultiPhysio cognitive workload: `y_cognitive_load`, with explicit binary form `y_cognitive_load_binary`
 - Comfort regression proxy: `y_comfort_proxy`
 
 Multi-head training is enabled by default (`targets.multi_head.enabled: true`).
+
+| Dataset | Target | Source | Interpretation |
+| --- | --- | --- | --- |
+| WESAD | stress | protocol label | experimentally induced stress |
+| MultiPhysio | stress | STAI-Y1 (`STAI`) | self-reported state anxiety |
+| MultiPhysio | cognitive load | NASA-TLX (`NASA`) | perceived workload |
+| MultiPhysio | comfort proxy | SAM Valence (`Valence`) | affective valence |
+| MultiPhysio | arousal | SAM Arousal (`Arousal`) | affective activation |
 
 ## Leakage-Safe Profile Handling
 Worker EMA baselines are fit on train split only:

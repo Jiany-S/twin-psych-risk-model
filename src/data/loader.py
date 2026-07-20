@@ -101,7 +101,12 @@ def load_or_generate(cfg: Mapping[str, object], schema: DataSchema) -> pd.DataFr
         multiphysio_cfg = dataset_cfg.get("multiphysio", {})
         if not isinstance(multiphysio_cfg, Mapping):
             multiphysio_cfg = {}
-        return load_multiphysio_dataset(Path(dataset_path), schema=schema, dataset_cfg=dict(multiphysio_cfg))
+        return load_multiphysio_dataset(
+            Path(dataset_path),
+            schema=schema,
+            dataset_cfg=dict(multiphysio_cfg),
+            targets_cfg=dict(cfg.get("targets", {})),
+        )
 
     # synthetic default/fallback
     synth_cfg = cfg.get("synthetic", {})

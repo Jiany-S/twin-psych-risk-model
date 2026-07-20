@@ -8,8 +8,8 @@ Scope: `src/run_experiment.py`, dataset loaders, windowing/features, worker prof
 
 | Area | Finding | Risk |
 | --- | --- | --- |
-| MultiPhysio target semantics | `y_stress` is derived from `labels.csv` column `NASA >= 40`. NASA-TLX is workload, not a direct stress label. | High: results should be called workload/high NASA-TLX risk, not stress, unless justified as a proxy. |
-| MultiPhysio physiology mapping | `temp` is populated from `EMG_RMSE` by default. This is EMG, not skin temperature. | High: temperature feature names and plots are scientifically wrong for MultiPhysio. |
+| MultiPhysio target semantics | Phase 2 corrected this: STAI maps to stress/state anxiety, NASA-TLX maps to cognitive workload, SAM Valence maps to comfort proxy, and SAM Arousal maps to arousal. | Remaining risk: historical runs before Phase 2 mislabeled NASA-TLX workload as stress. |
+| MultiPhysio physiology mapping | Phase 2 corrected this: `EMG_RMSE` maps to `emg_rmse`; no `temp` column is fabricated for MultiPhysio. | Remaining risk: historical runs before Phase 2 mislabeled EMG as temperature. |
 | WESAD time base | Native WESAD pickle rows are chest sample rows after truncating channels to shared length; configs treat them as 4 Hz and divide by `downsample_factor`. | High: reported seconds, HRV peak distances, forecast horizons, and stride are wrong for native pickles. |
 | WESAD downsampling | Loader physically keeps every `downsample_factor`-th row, and `run_experiment.py` also divides `task.sampling_rate_hz` by that same factor. | High: if `sampling_rate_hz` is already intended as post-downsample rate, this double-adjusts; if intended as raw WESAD, it is still wrong because native chest is not 4 Hz. |
 | MultiPhysio temporal rows | Each row is already a 60-second precomputed feature window. The pipeline windows those feature rows again. | Medium/high: configured windows are windows of 60-second summaries, not raw physiological windows. |
@@ -26,7 +26,17 @@ Scope: `src/run_experiment.py`, dataset loaders, windowing/features, worker prof
 | Synthetic/default | Generated worker time series with `ecg`, `eda`, `temp`, optional robot context, synthetic stress and comfort proxy. | One row per synthetic timestep. | `y_stress` binary synthetic risk; `y_comfort_proxy` synthetic comfort proxy. |
 | WESAD native pickle | Wearable stress/affect protocol with baseline, stress, amusement and other transitions; chest signals include ECG, EDA, Temp, Resp, ACC. | One row per retained sample after truncating selected channels to a shared minimum length and filtering to labels 1/2/3. | `y_stress`: label 2 = 1, label 1 = 0, label 3 either 0 or excluded. `y_comfort_proxy`: fixed protocol proxy baseline 0.9, stress 0.2, amusement 0.7. |
 | WESAD CSV exports | CSVs with schema columns or protocol labels, if no native pickles are found/selected. | One row per CSV row; optional downsample by row stride. | Same protocol mapping when `protocol_label` is present. |
-| MultiPhysio-HRC | Multimodal HRC dataset with 256 Hz raw physiology and precomputed features. The repo uses `features/bio_features_60s.csv`, `features/labels.csv`, and task availability. | One row per 60-second bio feature row, sorted by task order/repetition/window and reindexed per participant. | `y_stress`: `NASA >= stress_threshold` (default 40). This is high NASA-TLX workload, not direct stress. `y_comfort_proxy`: SAM Valence normalized `(Valence - 1) / 4`. |
+| MultiPhysio-HRC | Multimodal HRC dataset with 256 Hz raw physiology and precomputed features. The repo uses `features/bio_features_60s.csv`, `features/labels.csv`, and task availability. | One row per 60-second bio feature row, sorted by task order/repetition/window and reindexed per participant. | `y_stress`: normalized STAI-Y1 state anxiety. `y_cognitive_load`: normalized NASA-TLX workload. `y_cognitive_load_binary`: NASA-TLX >= 40 only when explicitly configured. `y_comfort_proxy`: normalized SAM Valence. `y_arousal`: normalized SAM Arousal. |
+
+## Target Table
+
+| Dataset | Target | Source | Interpretation |
+| --- | --- | --- | --- |
+| WESAD | stress | protocol label | experimentally induced stress |
+| MultiPhysio | stress | STAI-Y1 (`STAI`) | self-reported state anxiety |
+| MultiPhysio | cognitive load | NASA-TLX (`NASA`) | perceived workload |
+| MultiPhysio | comfort proxy | SAM Valence (`Valence`) | affective valence |
+| MultiPhysio | arousal | SAM Arousal (`Arousal`) | affective activation |
 
 ## What One Row Represents
 
@@ -52,19 +62,19 @@ Effective seconds below are the pipeline's current calculation: `task.sampling_r
 | `wesad_pilot_8subj_no_profiles.yaml` | WESAD | subject holdout | XGB + TFT | protocol stress vs baseline/amusement | 0.8 | 37.5 s reported | 3.75 s reported | 1.25 s reported | off | global |
 | `wesad_paper_fast.yaml` | WESAD | subject holdout | XGB + TFT | protocol stress vs baseline/amusement | 0.4 | 50.0 s reported | 2.5 s reported | 12.5 s reported | on, static meta off | online |
 | `wesad_paper_fast_no_profiles.yaml` | WESAD | subject holdout | XGB + TFT | protocol stress vs baseline/amusement | 0.4 | 50.0 s reported | 2.5 s reported | 12.5 s reported | off | online |
-| `multiphysio_debug.yaml` | MultiPhysio | time | XGB only | `NASA >= 40`, Valence proxy | 0.0166667 | 480.0 s | 60.0 s | 60.0 s | off | global |
-| `multiphysio_smoke.yaml` | MultiPhysio | subject holdout | XGB + TFT | `NASA >= 40`, comfort disabled | 0.0166667 | 360.0 s | 60.0 s | 60.0 s | off | global |
-| `multiphysio_full.yaml` | MultiPhysio | subject holdout | XGB + TFT | `NASA >= 40`, Valence proxy | 0.0166667 | 600.0 s | 60.0 s | 60.0 s | off | global |
+| `multiphysio_debug.yaml` | MultiPhysio | time | XGB only | primary `cognitive_load_binary` from NASA-TLX >= 40 | 0.0166667 | 480.0 s | 60.0 s | 60.0 s | off | global |
+| `multiphysio_smoke.yaml` | MultiPhysio | subject holdout | XGB + TFT | primary `cognitive_load_binary` from NASA-TLX >= 40 | 0.0166667 | 360.0 s | 60.0 s | 60.0 s | off | global |
+| `multiphysio_full.yaml` | MultiPhysio | subject holdout | XGB + TFT | primary `cognitive_load_binary` from NASA-TLX >= 40 | 0.0166667 | 600.0 s | 60.0 s | 60.0 s | off | global |
 
 ## Known Bugs And Scientific Risks
 
-1. MultiPhysio `temp` is actually `EMG_RMSE`.
-   - Source: `src/data/load_multiphysio.py` defaults `temp_col` to `EMG_RMSE`.
-   - Impact: engineered features named `temp_mean`, `temp_std`, `temp_slope` are EMG-derived in MultiPhysio runs.
+1. Historical MultiPhysio runs before Phase 2 used `EMG_RMSE` as `temp`.
+   - Current status: fixed in code/config; MultiPhysio now exposes `emg_rmse`.
+   - Impact: old reports and artifacts must not be interpreted as temperature-based physiology.
 
-2. MultiPhysio `stress` is high NASA-TLX workload.
-   - Source: `stress_label_col: NASA`, `stress_threshold: 40.0`.
-   - Impact: calling it stress overstates the target. Use "NASA-TLX workload" or "workload/stress proxy".
+2. Historical MultiPhysio runs before Phase 2 used `NASA >= 40` as `y_stress`.
+   - Current status: fixed in code/config; NASA-TLX is now `cognitive_load`/`cognitive_load_binary`, and STAI is `stress`.
+   - Impact: old reports and artifacts must be relabeled as workload benchmarks.
 
 3. WESAD time units are not trustworthy.
    - Source: WESAD loader creates `time_idx = np.arange(n)`, then config uses `sampling_rate_hz: 4.0` and physical row downsampling.
@@ -100,13 +110,11 @@ Effective seconds below are the pipeline's current calculation: `task.sampling_r
 
 ## Recommended Fixes In Priority Order
 
-1. Rename MultiPhysio target and report text to high NASA-TLX workload; reserve "stress" for WESAD protocol stress or explicitly say proxy.
-2. Stop mapping `EMG_RMSE` into `temp`; add a dataset-specific physiology schema or rename the third channel/features to `emg`.
-3. Define canonical time units per dataset: native WESAD raw Hz, post-downsample Hz, MultiPhysio feature-window cadence.
-4. Remove double downsample/rate adjustment by making `sampling_rate_hz` either raw input rate or post-loader effective rate, never both.
-5. Make WESAD loader resample aligned channels explicitly or document that only same-rate chest signals are supported.
-6. Remove `worker_id` from TFT static categoricals for subject-holdout, or use a true unknown-worker bucket without artificial val/test rows.
-7. Rebuild profile ablation configs so only one variable family changes: normalization fixed, static/profile covariates toggled.
-8. Add dummy baselines to `metrics.json`: prevalence AUPRC, always-positive F1, always-negative accuracy, validation/test prevalence.
-9. Align XGBoost and TFT stride/window semantics and report each model's actual evaluated sample count.
-10. Re-run WESAD and MultiPhysio baselines only after the above semantic fixes.
+1. Define canonical time units per dataset: native WESAD raw Hz, post-downsample Hz, MultiPhysio feature-window cadence.
+2. Remove double downsample/rate adjustment by making `sampling_rate_hz` either raw input rate or post-loader effective rate, never both.
+3. Make WESAD loader resample aligned channels explicitly or document that only same-rate chest signals are supported.
+4. Remove `worker_id` from TFT static categoricals for subject-holdout, or use a true unknown-worker bucket without artificial val/test rows.
+5. Rebuild profile ablation configs so only one variable family changes: normalization fixed, static/profile covariates toggled.
+6. Add dummy baselines to `metrics.json`: prevalence AUPRC, always-positive F1, always-negative accuracy, validation/test prevalence.
+7. Align XGBoost and TFT stride/window semantics and report each model's actual evaluated sample count.
+8. Re-run WESAD and MultiPhysio baselines after the remaining semantic and evaluation fixes.

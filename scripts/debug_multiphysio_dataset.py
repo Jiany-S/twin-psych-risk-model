@@ -34,15 +34,17 @@ def main() -> None:
 
     schema = DataSchema.from_config(cfg)
     raw_df = load_or_generate(cfg, schema)
+    target_metadata = raw_df.attrs.get("target_metadata", {})
+    feature_metadata = raw_df.attrs.get("feature_metadata", {})
     frame = preprocess_dataframe(cfg, raw_df, schema)
 
-    stress_counts = frame[schema.stress_target].value_counts(dropna=False).to_dict()
+    primary_counts = frame[schema.stress_target].value_counts(dropna=False).to_dict()
     by_class = (
         frame.groupby(schema.protocol_label, observed=True)
         .agg(
             rows=(schema.protocol_label, "size"),
             workers=(schema.worker_id, "nunique"),
-            stress_rate=(schema.stress_target, "mean"),
+            primary_target_mean=(schema.stress_target, "mean"),
         )
         .sort_values("rows", ascending=False)
     )
@@ -52,7 +54,7 @@ def main() -> None:
             rows=(schema.worker_id, "size"),
             first_time=(schema.time_idx, "min"),
             last_time=(schema.time_idx, "max"),
-            stress_rate=(schema.stress_target, "mean"),
+            primary_target_mean=(schema.stress_target, "mean"),
         )
         .sort_values("rows", ascending=False)
     )
@@ -61,13 +63,19 @@ def main() -> None:
         "rows": int(len(frame)),
         "workers": int(frame[schema.worker_id].nunique()),
         "classes": int(frame[schema.protocol_label].nunique()),
-        "stress_counts": {str(k): int(v) for k, v in stress_counts.items()},
+        "primary_target": {
+            "name": schema.primary_target_name,
+            "label_col": schema.primary_target,
+            "task_type": schema.primary_task_type,
+        },
+        "primary_target_counts": {str(k): int(v) for k, v in primary_counts.items()},
+        "target_metadata": target_metadata,
+        "feature_metadata": feature_metadata,
         "time_idx_min": int(frame[schema.time_idx].min()),
         "time_idx_max": int(frame[schema.time_idx].max()),
         "missing_core_pct": {
-            "ecg": float(frame["ecg"].isna().mean()) if "ecg" in frame.columns else 1.0,
-            "eda": float(frame["eda"].isna().mean()) if "eda" in frame.columns else 1.0,
-            "temp": float(frame["temp"].isna().mean()) if "temp" in frame.columns else 1.0,
+            col: float(frame[col].isna().mean()) if col in frame.columns else 1.0
+            for col in schema.physiology
         },
         "top_classes": by_class.head(10).reset_index().to_dict(orient="records"),
         "top_workers": per_worker.head(10).reset_index().to_dict(orient="records"),

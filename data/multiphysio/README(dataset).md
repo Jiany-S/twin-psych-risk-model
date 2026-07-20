@@ -111,6 +111,19 @@ MultiPhysio-HRC/
 - Features: aggregated files containing feature vectors for all modalities + questionnaire-based labels.
 - Participant overview of the performed tasks.
 
+### Repository Loader Semantics
+
+This repository uses `features/bio_features_60s.csv`, which contains precomputed 60-second physiological feature rows rather than raw biosignal samples. The current default mapping is:
+
+| Internal column | Source column | Meaning |
+| --- | --- | --- |
+| `hrv_mean_nn` | `HRV_MeanNN` | precomputed HRV mean NN interval |
+| `eda_mean` | `EDA_mean` | precomputed EDA mean |
+| `emg_rmse` | `EMG_RMSE` | precomputed trapezius EMG RMS |
+| `rrv_mean_bb` | `RRV_MeanBB` | precomputed respiration rate variability mean breath interval |
+
+Questionnaire targets are kept distinct: `STAI` is used for state-anxiety stress, `NASA` for cognitive workload, `Valence` for comfort/valence, and `Arousal` for affective activation. NASA-TLX is not treated as direct stress.
+
 ### Applications
 
 This dataset supports research in:

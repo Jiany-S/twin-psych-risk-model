@@ -49,12 +49,15 @@ def preprocess_dataframe(cfg: Mapping[str, object], df: pd.DataFrame, schema: Da
     frame = _ensure_columns(df, schema)
 
     # Keep only required/optional columns early to reduce memory footprint.
+    target_cols = [c for c in schema.configured_target_columns() if c in frame.columns]
     keep_cols = (
         [schema.worker_id, schema.timestamp, schema.time_idx, schema.protocol_label, schema.stress_target, schema.comfort_target]
+        + target_cols
         + list(schema.physiology)
         + list(schema.robot_context)
         + [schema.hazard_zone, schema.task_phase, schema.specialization_col, schema.experience_col]
     )
+    keep_cols = list(dict.fromkeys(keep_cols))
     for col in ("resp", "accel"):
         if col in frame.columns:
             keep_cols.append(col)
@@ -69,6 +72,8 @@ def preprocess_dataframe(cfg: Mapping[str, object], df: pd.DataFrame, schema: Da
     frame[schema.comfort_target] = (
         pd.to_numeric(frame[schema.comfort_target], errors="coerce").fillna(0.0).clip(0.0, 1.0).astype("float32")
     )
+    for col in target_cols:
+        frame[col] = pd.to_numeric(frame[col], errors="coerce").astype("float32")
     for col in schema.physiology:
         frame[col] = pd.to_numeric(frame[col], errors="coerce").astype("float32")
     for col in schema.robot_context:

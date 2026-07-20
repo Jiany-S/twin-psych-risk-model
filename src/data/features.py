@@ -89,6 +89,19 @@ def extract_window_features(
     return features
 
 
+def extract_precomputed_window_features(window: np.ndarray, feature_names: list[str]) -> dict[str, float]:
+    features: dict[str, float] = {}
+    for idx, name in enumerate(feature_names):
+        values = window[:, idx].astype(float)
+        features[f"{name}_mean"] = float(np.mean(values))
+        features[f"{name}_std"] = float(np.std(values))
+        features[f"{name}_min"] = float(np.min(values))
+        features[f"{name}_max"] = float(np.max(values))
+        features[f"{name}_last"] = float(values[-1])
+        features[f"{name}_slope"] = _slope(values)
+    return features
+
+
 def impute_with_train_statistics(
     X_train: np.ndarray,
     X_val: np.ndarray,

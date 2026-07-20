@@ -5,18 +5,16 @@ paths:
 
 dataset:
   name: multiphysio
-  report_name: MultiPhysio-HRC (bio 60s features)
+  report_name: MultiPhysio-HRC cognitive workload benchmark (bio 60s features)
   path: data/multiphysio
   multiphysio:
-    ecg_col: HRV_MeanNN
-    eda_col: EDA_mean
-    temp_col: EMG_RMSE
-    resp_col: RRV_MeanBB
+    feature_columns:
+      hrv_mean_nn: HRV_MeanNN
+      eda_mean: EDA_mean
+      emg_rmse: EMG_RMSE
+      rrv_mean_bb: RRV_MeanBB
     repetition_offset: 1
     min_rows_per_worker: 40
-    stress_label_col: NASA
-    stress_threshold: 40.0
-    comfort_label_col: Valence
 
 reproducibility:
   seed: 42
@@ -24,10 +22,45 @@ reproducibility:
 targets:
   multi_head:
     enabled: true
+  cognitive_load:
+    label_col: y_cognitive_load
+    source_col: NASA
+    source_questionnaire: NASA-TLX
+    source_range: [0, 100]
+    task_type: regression
+    threshold: null
+  cognitive_load_binary:
+    label_col: y_cognitive_load_binary
+    source_col: NASA
+    source_questionnaire: NASA-TLX
+    source_range: [0, 100]
+    task_type: classification
+    threshold: 40.0
   stress:
     label_col: y_stress
+    source_col: STAI
+    source_questionnaire: STAI-Y1
+    source_range: [20, 80]
+    task_type: regression
+    threshold: null
   comfort:
     label_col: y_comfort_proxy
+    source_col: Valence
+    source_questionnaire: SAM Valence
+    source_range: [1, 5]
+    task_type: regression
+    threshold: null
+  arousal:
+    label_col: y_arousal
+    source_col: Arousal
+    source_questionnaire: SAM Arousal
+    source_range: [1, 5]
+    task_type: regression
+    threshold: null
+
+experiment:
+  primary_target: cognitive_load_binary
+  task_name: high versus low cognitive workload from NASA-TLX
 
 task:
   horizon_steps: 1
@@ -51,7 +84,8 @@ features:
   time_idx: time_idx
   worker_id: worker_id
   protocol_label: protocol_label
-  physiology: [ecg, eda, temp]
+  physiology: [hrv_mean_nn, eda_mean, emg_rmse, rrv_mean_bb]
+  engineering_mode: precomputed
   use_robot_context: false
   robot_context: [distance_to_robot, robot_speed]
   optional:

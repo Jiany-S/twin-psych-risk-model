@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .features import extract_window_features
+from .features import extract_precomputed_window_features, extract_window_features
 from .schema import DataSchema
 
 
@@ -172,8 +172,24 @@ def engineer_window_features(
     min_scr_distance: int,
 ) -> tuple[np.ndarray, list[str]]:
     cols = list(schema.physiology) + list(schema.robot_context)
+    mode = str(getattr(schema, "feature_engineering_mode", "raw_signals"))
+    if mode == "precomputed":
+        rows: list[list[float]] = []
+        names: list[str] | None = None
+        for window in windows:
+            signal_feats = extract_precomputed_window_features(window[:, : len(cols)], cols)
+            if names is None:
+                names = list(signal_feats.keys())
+            rows.append([signal_feats[k] for k in names])
+        return np.array(rows, dtype=np.float32), (names or [])
+
+    if mode != "raw_signals":
+        raise ValueError(f"Unsupported feature engineering mode: {mode!r}. Expected 'raw_signals' or 'precomputed'.")
     if "ecg" not in cols or "eda" not in cols or "temp" not in cols:
-        raise ValueError("Expected physiology columns ecg, eda, temp for WESAD feature extraction.")
+        raise ValueError(
+            "Raw signal feature extraction requires physiology columns ['ecg', 'eda', 'temp']; "
+            f"got {list(schema.physiology)}."
+        )
 
     ecg_idx = cols.index("ecg")
     eda_idx = cols.index("eda")

@@ -344,11 +344,19 @@ def _comparison(metrics: dict[str, Any], include_comfort: bool) -> dict[str, Any
             ptr = ptr[key]
         return ptr
 
+    xgb_auroc = float(get(("xgboost", "stress", "auroc"), np.nan))
+    tft_auroc = float(get(("tft", "stress", "auroc"), np.nan))
+    if np.isfinite(xgb_auroc) and np.isfinite(tft_auroc):
+        winner = "xgboost" if xgb_auroc >= tft_auroc else "tft"
+    elif np.isfinite(xgb_auroc):
+        winner = "xgboost"
+    elif np.isfinite(tft_auroc):
+        winner = "tft"
+    else:
+        winner = "n/a"
     result = {
-        "stress_winner_by_auroc": "xgboost"
-        if (get(("xgboost", "stress", "auroc"), -1) >= get(("tft", "stress", "auroc"), -1))
-        else "tft",
-        "delta_stress_auroc": float(get(("tft", "stress", "auroc"), np.nan) - get(("xgboost", "stress", "auroc"), np.nan)),
+        "primary_winner_by_auroc": winner,
+        "delta_primary_auroc": float(tft_auroc - xgb_auroc),
     }
     if include_comfort:
         result["comfort_winner_by_rmse"] = (
@@ -369,6 +377,7 @@ def _write_results_md(
     profiles_enabled: bool,
 ) -> None:
     tft_stress = metrics.get("tft", {}).get("stress", {})
+    primary_label = str(metrics.get("primary_target", {}).get("target_name", "primary target"))
     tft_warning = ""
     if isinstance(tft_stress, dict):
         if str(tft_stress.get("auroc", "")).lower() == "nan":
@@ -399,11 +408,11 @@ def _write_results_md(
         "",
         "## Key Findings",
         "- No-leakage profile fitting: baselines fit on train split only and reused on val/test.",
-        f"- Stress AUROC winner: {metrics.get('comparison', {}).get('stress_winner_by_auroc', 'n/a')}",
+        f"- {primary_label} AUROC winner: {metrics.get('comparison', {}).get('primary_winner_by_auroc', 'n/a')}",
         f"- Comfort RMSE winner: {metrics.get('comparison', {}).get('comfort_winner_by_rmse', 'n/a')}",
         f"- TFT sanity note: {tft_warning}" if tft_warning else "- TFT sanity note: n/a",
         "",
-        "## Comparison Table",
+        "## Primary Target Comparison Table",
         "| Model | AUROC | AUPRC | F1 | Precision | Recall | Brier | ECE |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",
         f"| XGBoost | {xgb.get('auroc', 'n/a')} | {xgb.get('auprc', 'n/a')} | {xgb.get('f1', 'n/a')} | {xgb.get('precision', 'n/a')} | {xgb.get('recall', 'n/a')} | {xgb.get('brier', 'n/a')} | {xgb.get('ece', 'n/a')} |",
@@ -434,6 +443,8 @@ def run_experiment(config_path: str) -> Path:
     debug = bool(cfg.get("debug", False))
 
     raw_df = load_or_generate(cfg, schema)
+    target_metadata = raw_df.attrs.get("target_metadata", {})
+    feature_metadata = raw_df.attrs.get("feature_metadata", {})
     frame = preprocess_dataframe(cfg, raw_df, schema)
     split_mode = str(cfg.get("split", {}).get("mode", "time")).lower()
     split_desc = "time-per-worker"
@@ -463,7 +474,7 @@ def run_experiment(config_path: str) -> Path:
     if debug:
         for name, df in (("train", train_df), ("val", val_df), ("test", test_df)):
             counts = df[schema.stress_target].value_counts(dropna=False).to_dict()
-            logger.info("Split %s raw rows=%d stress_counts=%s", name, len(df), counts)
+            logger.info("Split %s raw rows=%d primary_target_counts=%s", name, len(df), counts)
 
     train_df, val_df, test_df, static_profiles, profiles_info = _profile_transform(train_df, val_df, test_df, schema, cfg)
     use_static_meta = bool(cfg.get("profiles", {}).get("use_static_meta", False))
@@ -563,9 +574,15 @@ def run_experiment(config_path: str) -> Path:
         "window_counts": window_counts,
         "class_balance": class_balance,
         "profiles_info": profiles_info,
-        "task_name": "stress vs non-stress (baseline+amusement)"
-        if bool(cfg.get("dataset", {}).get("stress_include_amusement", False))
-        else "stress vs baseline",
+        "task_name": str(cfg.get("experiment", {}).get("task_name", schema.primary_target_name)),
+        "primary_target": {
+            "target_name": schema.primary_target_name,
+            "label_col": schema.primary_target,
+            "task_type": schema.primary_task_type,
+            "metadata": target_metadata.get(schema.primary_target_name, {}),
+        },
+        "target_metadata": target_metadata,
+        "feature_metadata": feature_metadata,
     }
     xgb_out = None
     tft_stress = None
