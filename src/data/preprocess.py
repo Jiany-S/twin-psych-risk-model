@@ -38,9 +38,9 @@ def _ensure_columns(df: pd.DataFrame, schema: DataSchema) -> pd.DataFrame:
     if schema.task_phase not in frame.columns:
         frame[schema.task_phase] = "default"
     if schema.specialization_col not in frame.columns:
-        frame[schema.specialization_col] = frame[schema.worker_id].astype(str).map(lambda x: abs(hash(x)) % 5)
+        frame[schema.specialization_col] = -1
     if schema.experience_col not in frame.columns:
-        frame[schema.experience_col] = frame[schema.worker_id].astype(str).map(lambda x: 1 + abs(hash(x)) % 5)
+        frame[schema.experience_col] = 0
     return frame
 
 
@@ -83,7 +83,11 @@ def preprocess_dataframe(cfg: Mapping[str, object], df: pd.DataFrame, schema: Da
     frame[schema.hazard_zone] = pd.to_numeric(frame[schema.hazard_zone], errors="coerce").fillna(0).astype("int16")
     frame[schema.task_phase] = frame[schema.task_phase].fillna("default").astype(str)
     frame[schema.protocol_label] = frame.get(schema.protocol_label, "unknown")
-    frame[schema.specialization_col] = pd.to_numeric(frame[schema.specialization_col], errors="coerce").fillna(0).astype("int16")
-    frame[schema.experience_col] = pd.to_numeric(frame[schema.experience_col], errors="coerce").fillna(1).astype("int16")
+    frame[schema.specialization_col] = (
+        pd.to_numeric(frame[schema.specialization_col], errors="coerce").fillna(-1).astype("int16")
+    )
+    frame[schema.experience_col] = (
+        pd.to_numeric(frame[schema.experience_col], errors="coerce").fillna(0).astype("int16")
+    )
     frame = frame.sort_values([schema.worker_id, schema.time_idx], kind="mergesort", ignore_index=True)
     return frame

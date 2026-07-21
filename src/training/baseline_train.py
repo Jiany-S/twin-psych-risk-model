@@ -101,6 +101,7 @@ def _evaluate_classifier(
     metrics["n_predictions"] = int(len(test_probs))
     metrics["n_targets"] = int(len(y_test))
     metrics["model_family"] = model_name
+    metrics["feature_names"] = list(artifact.get("feature_names", []))
 
     model_dir = run_dir / "models"
     pred_dir = run_dir / "predictions"

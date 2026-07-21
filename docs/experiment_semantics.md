@@ -1,6 +1,6 @@
 # Experiment Semantics
 
-This document freezes the current experiment meanings as of 2026-07-20. It is descriptive, not a recommendation that the current semantics are scientifically valid.
+This document freezes the current experiment meanings as of 2026-07-21. It is descriptive, not a recommendation that the current semantics are scientifically valid.
 
 ## Target Definitions
 
@@ -51,12 +51,24 @@ Current window label rule in `build_windows`: for a window `[start, end)`, the l
 
 ## Profile Behavior
 
-| Setting | XGBoost current behavior | TFT current behavior | Caveat |
+Prompt 4 update: the old mixed profile behavior below has been superseded in code. Personalization now separates train-fitted global normalization, explicit baseline/rest calibration normalization, and optional profile-vector inputs. `worker_id` is now only a TFT grouping identifier, not a static categorical covariate, and validation/test worker IDs are no longer inserted into the TFT training frame. Missing real role metadata is `-1`; missing real experience metadata is `0`; hash-generated role/experience metadata has been removed.
+
+The current profile input flags are:
+
+| Flag | Meaning |
+| --- | --- |
+| `normalization.mode: global` | Fit physiology normalization statistics on training rows only and apply to validation/test. |
+| `normalization.mode: calibration` | Normalize each subject by explicit unlabeled baseline/rest calibration rows. |
+| `profiles.include_calibration_features` | Append calibration mean/std/median/robust-scale values to model inputs. |
+| `profiles.include_role_metadata` | Append real role metadata only when a dataset provides it; otherwise keep disabled. |
+| `profiles.include_experience_metadata` | Append real experience metadata only when a dataset provides it. |
+
+| Current setting | XGBoost current behavior | TFT current behavior | Caveat |
 | --- | --- | --- | --- |
-| `profiles.enabled: true`, `use_static_meta: true` | Adds static profile table columns to engineered features. Physiology is normalized according to normalization/profile mode. | Adds baseline mean/sigma as known reals and includes `worker_id`, `specialization_index`, `experience_level` as static categoricals. | Static categorical `worker_id` is unsafe for subject holdout. |
-| `profiles.enabled: true`, `use_static_meta: false` | Usually no appended profile columns; input still affected by normalization. | Adds baseline mean/sigma known reals because `use_profiles=True`. | XGB and TFT do not receive equivalent profile information. |
-| `profiles.enabled: false` with `normalization.mode: online` | No static profile table, but physiology is still online-normalized and baseline columns exist in flat frames. | No profile known reals, but physiology is still online-normalized. | "Profiles off" is not necessarily "raw signals." |
-| Built-in XGB ablation in `run_experiment.py` | Reuses the already-engineered `X_all`; only removes appended static profile table. | No built-in TFT ablation. | If static profiles are empty, profiles-on/off XGB ablation can be identical. |
+| Profile flags all false | No appended profile columns; physiology is normalized according to `normalization.mode`. | No profile static real covariates; `worker_id` is grouping only. | This isolates normalization from profile-vector inputs. |
+| `include_calibration_features: true` | Appends calibration statistics to the engineered feature matrix. | Passes calibration statistics as static real covariates. | Calibration statistics must come only from explicit baseline/rest rows. |
+| `include_experience_metadata: true` | Appends real experience metadata where available. | Passes experience metadata as a static real covariate. | Keep disabled for datasets without real experience metadata. |
+| `include_role_metadata: true` | Appends real role metadata where available. | Passes role metadata as a static real covariate. | Keep disabled for WESAD and current MultiPhysio because no real role field is loaded. |
 
 ## Split Semantics
 
@@ -71,8 +83,8 @@ Current window label rule in `build_windows`: for a window `[start, end)`, the l
 | --- | --- | --- | --- |
 | Window construction | Explicit NumPy windows with `window_step`. | `TimeSeriesDataSet` encoder/prediction windows; for `window_step > 1`, rows are first strided. | Not exactly. |
 | Engineered features | Raw WESAD/synthetic runs use HRV/EDA/temp signal features. MultiPhysio runs use aggregate features over precomputed columns such as `hrv_mean_nn`, `eda_mean`, `emg_rmse`, and `rrv_mean_bb`. | Raw or precomputed row-level reals plus known covariates, depending on config. | No; model families intentionally differ, but row semantics must be clear. |
-| Profiles | Static profile table appended only in some configs. | Baseline known reals when `use_profiles=True`; static categoricals always include worker/meta. | No. |
-| Subject IDs | Not appended unless static profile table indirectly includes subject-derived hash/meta. | Always included as static categorical. | No, especially under holdout. |
+| Profiles | Optional calibration and real metadata profile columns appended when enabled. | Same enabled profile columns are passed as static real covariates. | Closer, but XGBoost still uses engineered windows while TFT uses row-level sequence covariates. |
+| Subject IDs | Not appended as features. | Used only as `group_ids` for sequence construction. | Cleaner for holdout; still verify prevalence and grouping behavior per run. |
 
 ## Metrics Semantics
 

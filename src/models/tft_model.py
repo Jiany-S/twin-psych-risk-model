@@ -27,22 +27,23 @@ def build_tft_datasets(
     horizon: int,
     use_profiles: bool,
     known_categoricals: Sequence[str] | None = None,
+    static_reals: Sequence[str] | None = None,
+    time_varying_known_reals: Sequence[str] | None = None,
+    static_categoricals: Sequence[str] | None = None,
 ) -> tuple[Any, Any]:
     pf = _require_tft()
     TimeSeriesDataSet = pf.TimeSeriesDataSet
 
     # Match XGB window semantics: require a full encoder window for each prediction.
     min_encoder_length = int(window_length)
-    static_reals: list[str] = []
-    profile_reals: list[str] = []
-    if use_profiles:
-        profile_reals = [f"baseline_mu_{f}" for f in schema.physiology] + [f"baseline_sigma_{f}" for f in schema.physiology]
+    static_real_cols = list(static_reals or [])
+    time_varying_known_real_cols = list(time_varying_known_reals or [])
+    static_categorical_cols = list(static_categoricals or [])
     categorical_encoders = {
-        "worker_id": pf.data.encoders.NaNLabelEncoder(add_nan=True),
-        "specialization_index": pf.data.encoders.NaNLabelEncoder(add_nan=True),
-        "experience_level": pf.data.encoders.NaNLabelEncoder(add_nan=True),
         "task_phase": pf.data.encoders.NaNLabelEncoder(add_nan=True),
     }
+    for col in static_categorical_cols:
+        categorical_encoders[col] = pf.data.encoders.NaNLabelEncoder(add_nan=True)
 
     training = TimeSeriesDataSet(
         train_df,
@@ -54,9 +55,9 @@ def build_tft_datasets(
         max_prediction_length=horizon,
         min_prediction_length=horizon,
         min_prediction_idx=0,
-        static_categoricals=["worker_id", "specialization_index", "experience_level"],
-        static_reals=static_reals,
-        time_varying_known_reals=list(schema.robot_context) + [schema.hazard_zone] + profile_reals,
+        static_categoricals=static_categorical_cols,
+        static_reals=static_real_cols,
+        time_varying_known_reals=list(schema.robot_context) + [schema.hazard_zone] + time_varying_known_real_cols,
         time_varying_known_categoricals=list(known_categoricals or ["task_phase"]),
         time_varying_unknown_reals=list(schema.physiology),
         add_relative_time_idx=True,

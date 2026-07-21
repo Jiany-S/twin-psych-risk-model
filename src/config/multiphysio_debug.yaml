@@ -76,8 +76,9 @@ split:
   seed: 42
 
 profiles:
-  enabled: false
-  use_static_meta: false
+  include_calibration_features: false
+  include_role_metadata: false
+  include_experience_metadata: false
 
 features:
   timestamp: timestamp

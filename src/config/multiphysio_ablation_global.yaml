@@ -5,40 +5,8 @@ paths:
 
 dataset:
   name: multiphysio
-  report_name: MultiPhysio-HRC cognitive workload benchmark (smoke)
+  report_name: "MultiPhysio-HRC ablation: global normalization only"
   path: data/multiphysio
-  subjects:
-    [
-      "1005",
-      "1007",
-      "1008",
-      "10000",
-      "10001",
-      "1030",
-      "1031",
-      "1032",
-      "1034",
-      "1036",
-      "1037",
-      "1038",
-      "1039",
-      "1043",
-      "1045",
-      "1050",
-      "1051",
-      "1053",
-      "1055",
-      "1056",
-      "1057",
-      "1062",
-      "1063",
-      "1066",
-      "1067",
-      "1075",
-      "10869",
-      "1090",
-      "10978",
-    ]
   multiphysio:
     feature_columns:
       hrv_mean_nn: HRV_MeanNN
@@ -48,26 +16,13 @@ dataset:
     repetition_offset: 1
     min_rows_per_worker: 40
 
-reproducibility:
-  seed: 42
+experiment:
+  primary_target: cognitive_load_binary
+  task_name: high versus low cognitive workload from NASA-TLX
 
 targets:
   multi_head:
     enabled: false
-  stress:
-    label_col: y_stress
-    source_col: STAI
-    source_questionnaire: STAI-Y1
-    source_range: [20, 80]
-    task_type: regression
-    threshold: null
-  cognitive_load:
-    label_col: y_cognitive_load
-    source_col: NASA
-    source_questionnaire: NASA-TLX
-    source_range: [0, 100]
-    task_type: regression
-    threshold: null
   cognitive_load_binary:
     label_col: y_cognitive_load_binary
     source_col: NASA
@@ -75,64 +30,46 @@ targets:
     source_range: [0, 100]
     task_type: classification
     threshold: 40.0
+  cognitive_load:
+    label_col: y_cognitive_load
+    source_col: NASA
+    source_questionnaire: NASA-TLX
+    source_range: [0, 100]
+    task_type: regression
+  stress:
+    label_col: y_stress
+    source_col: STAI
+    source_questionnaire: STAI-Y1
+    source_range: [20, 80]
+    task_type: regression
   comfort:
     label_col: y_comfort_proxy
     source_col: Valence
     source_questionnaire: SAM Valence
     source_range: [1, 5]
     task_type: regression
-    threshold: null
   arousal:
     label_col: y_arousal
     source_col: Arousal
     source_questionnaire: SAM Arousal
     source_range: [1, 5]
     task_type: regression
-    threshold: null
-
-experiment:
-  primary_target: cognitive_load_binary
-  task_name: high versus low cognitive workload from NASA-TLX
 
 task:
   horizon_steps: 1
-  window_length: 6
+  window_length: 8
   sampling_rate_hz: 0.0166667
   window_step: 1
 
 split:
-  mode: subject_holdout
-  train_subjects:
-    [
-      "1005",
-      "1007",
-      "10001",
-      "1031",
-      "1037",
-      "1038",
-      "1039",
-      "1043",
-      "1045",
-      "1050",
-      "1053",
-      "1055",
-      "1056",
-      "1057",
-      "1062",
-      "1063",
-      "1066",
-      "1067",
-      "1075",
-      "10869",
-      "1090",
-      "10978",
-    ]
-  val_subjects: ["1032", "1008", "1051"]
-  test_subjects: ["1034", "1030", "10000"]
+  mode: time
   train_ratio: 0.7
   val_ratio: 0.15
   test_ratio: 0.15
   seed: 42
+
+normalization:
+  mode: global
 
 profiles:
   include_calibration_features: false
@@ -147,7 +84,6 @@ features:
   physiology: [hrv_mean_nn, eda_mean, emg_rmse, rrv_mean_bb]
   engineering_mode: precomputed
   use_robot_context: false
-  robot_context: [distance_to_robot, robot_speed]
   optional:
     hazard_zone: hazard_zone
     task_phase: task_phase
@@ -160,32 +96,22 @@ features:
     min_scr_distance: 3
 
 models:
+  run_dummy: true
+  run_logistic: true
+  run_random_forest: true
   run_xgb: true
-  run_tft: true
+  run_tft: false
 
 xgboost:
   max_depth: 4
-  n_estimators: 100
+  n_estimators: 80
   learning_rate: 0.05
   subsample: 0.9
   colsample_bytree: 0.9
-  early_stopping_rounds: 20
+  early_stopping_rounds: 15
   calibration: isotonic
   tree_method: auto
   predictor: auto
-
-tft:
-  strategy: multi_model
-  max_epochs: 2
-  hidden_size: 16
-  lstm_layers: 1
-  dropout: 0.1
-  batch_size: 64
-  num_workers: 0
-  gpus: 0
-  early_stop_patience: 1
-  learning_rate: 1.0e-3
-  tft_loss: quantile
 
 report:
   top_k_features: 15

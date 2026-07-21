@@ -134,6 +134,7 @@ def train_xgb_tasks(
     stress_metrics["n_predictions"] = int(len(stress_pred))
     stress_metrics["n_targets"] = int(len(y_stress[test_idx]))
     stress_metrics["model_family"] = "xgboost_boosted_tree"
+    stress_metrics["feature_names"] = names
     stress_imp = _importance(stress.model, names, cfg["report"]["top_k_features"])
     stress_path = run_dir / "models" / f"{model_prefix}_stress.pkl"
     joblib.dump({"model": stress.model, "calibrator": stress.calibrator, "feature_names": names}, stress_path)

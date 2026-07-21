@@ -21,7 +21,15 @@ from .data.windowing import (
     create_time_splits,
     engineer_window_features,
 )
-from .profiles.worker_profile import WorkerProfileStore
+from .profiles.worker_profile import (
+    CalibrationPolicy,
+    apply_calibration_normalization,
+    apply_global_normalization,
+    attach_calibration_columns,
+    build_profile_feature_table,
+    fit_calibration_table,
+    fit_global_normalization,
+)
 from .training.plotting import (
     plot_calibration,
     plot_confusion_matrix,
@@ -82,129 +90,84 @@ def _impute_raw_split(split_df: pd.DataFrame, schema: DataSchema) -> pd.DataFram
 def _profile_transform(
     train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame, schema: DataSchema, cfg: dict[str, Any]
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
-    def apply_global_norm(frame: pd.DataFrame, stats: dict[str, tuple[float, float]]) -> pd.DataFrame:
-        out = frame.copy()
-        for col in schema.physiology:
-            mu, sigma = stats[col]
-            out[f"baseline_mu_{col}"] = mu
-            out[f"baseline_sigma_{col}"] = max(sigma, 1e-6)
-            out[col] = (out[col] - out[f"baseline_mu_{col}"]) / out[f"baseline_sigma_{col}"]
-        return out
-
-    def apply_online_norm(frame: pd.DataFrame, alpha: float, warmup_steps: int) -> pd.DataFrame:
-        out = frame.copy()
-        for col in schema.physiology:
-            out[f"baseline_mu_{col}"] = np.nan
-            out[f"baseline_sigma_{col}"] = np.nan
-
-        for worker_id, worker_df in out.groupby(schema.worker_id, observed=True):
-            idx = worker_df.sort_values(schema.time_idx).index
-            worker = out.loc[idx]
-            for col in schema.physiology:
-                series = worker[col].astype(float).to_numpy()
-                n = len(series)
-                warm = min(max(3, warmup_steps), n)
-                init = series[:warm]
-                mu = float(np.nanmean(init))
-                sigma = float(np.nanstd(init) + 1e-6)
-                if not np.isfinite(mu):
-                    mu = 0.0
-                if not np.isfinite(sigma) or sigma <= 0:
-                    sigma = 1.0
-                mus = np.zeros(n, dtype=np.float32)
-                sigmas = np.zeros(n, dtype=np.float32)
-                norm = np.zeros(n, dtype=np.float32)
-                for i, value in enumerate(series):
-                    if not np.isfinite(value):
-                        value = mu
-                    mus[i] = mu
-                    sigmas[i] = sigma
-                    norm[i] = float((value - mu) / max(sigma, 1e-6))
-                    mu = (1 - alpha) * mu + alpha * float(value)
-                    var = (1 - alpha) * (sigma**2) + alpha * float((value - mu) ** 2)
-                    sigma = float(np.sqrt(max(var, 1e-6)))
-                out.loc[idx, col] = norm
-                out.loc[idx, f"baseline_mu_{col}"] = mus
-                out.loc[idx, f"baseline_sigma_{col}"] = sigmas
-        return out
-
     profiles_cfg = cfg.get("profiles", {})
-    enabled = bool(profiles_cfg.get("enabled", True))
     normalization_cfg = cfg.get("normalization", {})
-    # Keep normalization independent from profile-feature ablations.
-    mode = str(normalization_cfg.get("mode", profiles_cfg.get("mode", "global"))).lower()
-    use_static_meta = bool(profiles_cfg.get("use_static_meta", False))
-    alpha = float(cfg.get("profile", {}).get("ema_alpha", 0.1))
-    warmup_steps = int(normalization_cfg.get("warmup_steps", profiles_cfg.get("warmup_steps", 30)))
-    fit_subjects = sorted(train_df[schema.worker_id].astype(str).unique().tolist())
-    # Always normalize physiology signals regardless of profile ablation settings.
+    calibration_cfg = cfg.get("calibration", {})
+    mode = str(normalization_cfg.get("mode", "global")).lower()
     if mode == "online":
-        train_z = apply_online_norm(train_df, alpha=alpha, warmup_steps=warmup_steps)
-        val_z = apply_online_norm(val_df, alpha=alpha, warmup_steps=warmup_steps)
-        test_z = apply_online_norm(test_df, alpha=alpha, warmup_steps=warmup_steps)
-    else:
-        # default: train-only global normalization
-        stats: dict[str, tuple[float, float]] = {}
-        for col in schema.physiology:
-            series = train_df[col].astype(float).replace([np.inf, -np.inf], np.nan).dropna()
-            mu = float(series.mean()) if len(series) else 0.0
-            sigma = float(series.std() + 1e-6) if len(series) else 1.0
-            stats[col] = (mu, sigma)
-        train_z = apply_global_norm(train_df, stats)
-        val_z = apply_global_norm(val_df, stats)
-        test_z = apply_global_norm(test_df, stats)
+        raise ValueError("normalization.mode='online' was removed; use 'global' or 'calibration'.")
+    if mode not in {"global", "calibration"}:
+        raise ValueError("normalization.mode must be one of: global, calibration.")
 
-    if enabled and use_static_meta:
-        profile_store = WorkerProfileStore(schema.physiology)
-        profile_store.fit_baselines(
-            train_df,
-            alpha=alpha,
-            safe_col=cfg.get("profile", {}).get("safe_col"),
-            worker_col=schema.worker_id,
-        )
-        static = profile_store.get_static_profile_table().rename(columns={"specialization_id": "specialization_index"})
+    policy = CalibrationPolicy(
+        protocol_labels=tuple(str(v).lower() for v in calibration_cfg.get("protocol_labels", ["baseline", "rest"])),
+        task_phases=tuple(str(v).lower() for v in calibration_cfg.get("task_phases", [])),
+        max_rows_per_subject=calibration_cfg.get("max_rows_per_subject"),
+        include_median=bool(calibration_cfg.get("include_median", True)),
+        robust_scale=str(calibration_cfg.get("robust_scale", "iqr")).lower(),
+    )
+    global_stats = fit_global_normalization(train_df, schema.physiology)
+    train_cal, train_cal_diag = fit_calibration_table(
+        train_df, schema.worker_id, schema.protocol_label, schema.task_phase, schema.physiology, policy, global_stats
+    )
+    val_cal, val_cal_diag = fit_calibration_table(
+        val_df, schema.worker_id, schema.protocol_label, schema.task_phase, schema.physiology, policy, global_stats
+    )
+    test_cal, test_cal_diag = fit_calibration_table(
+        test_df, schema.worker_id, schema.protocol_label, schema.task_phase, schema.physiology, policy, global_stats
+    )
+
+    train_attached = attach_calibration_columns(train_df, train_cal, schema.physiology)
+    val_attached = attach_calibration_columns(val_df, val_cal, schema.physiology)
+    test_attached = attach_calibration_columns(test_df, test_cal, schema.physiology)
+
+    if mode == "calibration":
+        train_z = apply_calibration_normalization(train_attached, schema.physiology)
+        val_z = apply_calibration_normalization(val_attached, schema.physiology)
+        test_z = apply_calibration_normalization(test_attached, schema.physiology)
     else:
-        static = pd.DataFrame(columns=["worker_id", "specialization_index", "experience_level"])
+        train_z = apply_global_normalization(train_attached, schema.physiology, global_stats)
+        val_z = apply_global_normalization(val_attached, schema.physiology, global_stats)
+        test_z = apply_global_normalization(test_attached, schema.physiology, global_stats)
+
+    combined_cal = pd.concat([train_cal, val_cal, test_cal], ignore_index=True).drop_duplicates("worker_id")
+    source_df = pd.concat([train_z, val_z, test_z], ignore_index=True)
+    static, static_cols = build_profile_feature_table(
+        combined_cal,
+        source_df,
+        worker_col=schema.worker_id,
+        specialization_col=schema.specialization_col,
+        experience_col=schema.experience_col,
+        include_calibration_features=bool(profiles_cfg.get("include_calibration_features", False)),
+        include_role_metadata=bool(profiles_cfg.get("include_role_metadata", False)),
+        include_experience_metadata=bool(profiles_cfg.get("include_experience_metadata", False)),
+    )
+    if not static_cols:
+        static = pd.DataFrame(columns=["worker_id"])
 
     return train_z, val_z, test_z, static, {
-        "enabled": enabled,
+        "enabled": bool(static_cols),
         "normalization_mode": mode,
-        "mode": mode,
-        "warmup_steps": warmup_steps if mode == "online" else 0,
-        "fit_subjects": fit_subjects,
-        "use_static_meta": use_static_meta if enabled else False,
+        "global_fit_subjects": sorted(train_df[schema.worker_id].astype(str).unique().tolist()),
+        "calibration_policy": policy.__dict__,
+        "calibration_diagnostics": {"train": train_cal_diag, "val": val_cal_diag, "test": test_cal_diag},
+        "profile_feature_columns": static_cols,
+        "include_calibration_features": bool(profiles_cfg.get("include_calibration_features", False)),
+        "include_role_metadata": bool(profiles_cfg.get("include_role_metadata", False)),
+        "include_experience_metadata": bool(profiles_cfg.get("include_experience_metadata", False)),
     }
 
 
-def _attach_static(df: pd.DataFrame, static: pd.DataFrame, schema: DataSchema, use_static_meta: bool) -> pd.DataFrame:
+def _attach_static(df: pd.DataFrame, static: pd.DataFrame, schema: DataSchema, use_profile_inputs: bool) -> pd.DataFrame:
     frame = df.copy()
-    if not static.empty:
-        frame = frame.merge(static, on="worker_id", how="left")
-    if use_static_meta:
-        if "specialization_index" not in frame.columns:
-            if schema.specialization_col in frame.columns:
-                frame["specialization_index"] = frame[schema.specialization_col]
-            else:
-                frame["specialization_index"] = 0
-        if "experience_level" not in frame.columns:
-            if schema.experience_col in frame.columns:
-                frame["experience_level"] = frame[schema.experience_col]
-            else:
-                frame["experience_level"] = 1
-    else:
-        frame["specialization_index"] = 0
-        frame["experience_level"] = 1
-    frame["specialization_index"] = frame["specialization_index"].fillna(0).astype(int)
-    frame["experience_level"] = frame["experience_level"].fillna(1).astype(int)
-    for col in schema.physiology:
-        mu_col = f"baseline_mu_{col}"
-        sigma_col = f"baseline_sigma_{col}"
-        if mu_col not in frame.columns:
-            frame[mu_col] = 0.0
-        if sigma_col not in frame.columns:
-            frame[sigma_col] = 1.0
-        frame[mu_col] = frame[mu_col].fillna(0.0)
-        frame[sigma_col] = frame[sigma_col].fillna(1.0)
+    profile_cols = [c for c in static.columns if c != "worker_id"] if not static.empty else []
+    merge_cols = ["worker_id", *[c for c in profile_cols if c not in frame.columns]]
+    if use_profile_inputs and len(merge_cols) > 1:
+        frame = frame.merge(static[merge_cols], on="worker_id", how="left")
+    for col in profile_cols:
+        if col not in frame.columns:
+            continue
+        frame[col] = pd.to_numeric(frame[col], errors="coerce").fillna(0.0)
     return frame
 
 
@@ -242,8 +205,8 @@ def _safe_git_hash() -> str:
 
 
 def _profile_feature_stats(train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame) -> dict[str, Any]:
-    cols = [c for c in train_df.columns if c.startswith("baseline_mu_") or c.startswith("baseline_sigma_")]
-    cols += [c for c in ["specialization_index", "experience_level"] if c in train_df.columns]
+    cols = [c for c in train_df.columns if c.startswith("calib_") or c.startswith("norm_")]
+    cols += [c for c in ["role_metadata", "experience_metadata"] if c in train_df.columns]
     cols = sorted(set(cols))
     out: dict[str, Any] = {}
     for split_name, frame in (("train", train_df), ("val", val_df), ("test", test_df)):
@@ -449,6 +412,39 @@ def _write_results_md(
     (run_dir / "results.md").write_text("\n".join(lines), encoding="utf-8")
 
 
+def _write_profile_ablation_report(run_dir: Path, metrics: dict[str, Any]) -> None:
+    info = metrics.get("profiles_info", {})
+    lines = [
+        "# Profile Ablation Report",
+        "",
+        f"- Normalization mode: {info.get('normalization_mode', 'n/a')}",
+        f"- Include calibration features: {info.get('include_calibration_features', False)}",
+        f"- Include role metadata: {info.get('include_role_metadata', False)}",
+        f"- Include experience metadata: {info.get('include_experience_metadata', False)}",
+        f"- Profile feature columns: {info.get('profile_feature_columns', [])}",
+        "",
+        "## Model Feature Lists",
+    ]
+    report_json: dict[str, Any] = {"profiles_info": info, "models": {}}
+    for model_name, block in metrics.items():
+        if isinstance(block, dict) and isinstance(block.get("stress"), dict) and "feature_names" in block["stress"]:
+            feature_names = block["stress"].get("feature_names", [])
+            model_metrics = {
+                key: block["stress"].get(key)
+                for key in ["auroc", "auprc", "f1", "precision", "recall", "specificity", "balanced_accuracy", "brier", "ece"]
+            }
+            report_json["models"][model_name] = {"feature_names": feature_names, "metrics": model_metrics}
+            lines += [
+                "",
+                f"### {model_name}",
+                f"- Feature count: {len(feature_names)}",
+                f"- Features: {feature_names}",
+                f"- Metrics: {model_metrics}",
+            ]
+    (run_dir / "profile_ablation_report.md").write_text("\n".join(lines), encoding="utf-8")
+    save_json(report_json, run_dir / "profile_ablation_report.json")
+
+
 def run_experiment(config_path: str) -> Path:
     default_cfg_path = Path(__file__).resolve().parent / "config" / "default.yaml"
     if Path(config_path).resolve() == default_cfg_path.resolve():
@@ -495,10 +491,10 @@ def run_experiment(config_path: str) -> Path:
             logger.info("Split %s raw rows=%d primary_target_counts=%s", name, len(df), counts)
 
     train_df, val_df, test_df, static_profiles, profiles_info = _profile_transform(train_df, val_df, test_df, schema, cfg)
-    use_static_meta = bool(cfg.get("profiles", {}).get("use_static_meta", False))
-    train_df = _attach_static(train_df, static_profiles, schema, use_static_meta=use_static_meta)
-    val_df = _attach_static(val_df, static_profiles, schema, use_static_meta=use_static_meta)
-    test_df = _attach_static(test_df, static_profiles, schema, use_static_meta=use_static_meta)
+    use_profile_inputs = not static_profiles.empty and len(static_profiles.columns) > 1
+    train_df = _attach_static(train_df, static_profiles, schema, use_profile_inputs=use_profile_inputs)
+    val_df = _attach_static(val_df, static_profiles, schema, use_profile_inputs=use_profile_inputs)
+    test_df = _attach_static(test_df, static_profiles, schema, use_profile_inputs=use_profile_inputs)
     numeric_diag = _numeric_feature_stats(train_df, val_df, test_df)
     required_numeric = list(schema.physiology) + list(schema.robot_context) + [schema.hazard_zone]
     for split_name, frame in (("train", train_df), ("val", val_df), ("test", test_df)):
@@ -617,7 +613,7 @@ def run_experiment(config_path: str) -> Path:
             static_profiles=static_profiles,
             split_indices=split_idx,
             run_dir=run_paths.root,
-            use_profiles=bool(cfg.get("profiles", {}).get("enabled", True)),
+            use_profiles=use_profile_inputs,
         )
         for model_name, artifact in baseline_out.items():
             metrics[model_name] = {"stress": artifact.metrics | {"model_path": str(artifact.model_path)}}
@@ -648,7 +644,7 @@ def run_experiment(config_path: str) -> Path:
             static_profiles=static_profiles,
             split_indices=split_idx,
             run_dir=run_paths.root,
-            use_profiles=bool(cfg.get("profiles", {}).get("enabled", True)),
+            use_profiles=use_profile_inputs,
             model_prefix="xgb",
         )
         xgb_metrics = {"stress": xgb_out["stress"].metrics | {"model_path": str(xgb_out["stress"].model_path)}}
@@ -681,7 +677,7 @@ def run_experiment(config_path: str) -> Path:
             horizon=horizon,
             window_step=window_step,
             model_name="tft_stress",
-            use_profiles=bool(cfg.get("profiles", {}).get("enabled", True)),
+            use_profiles=use_profile_inputs,
         )
         tft_metrics = {"stress": tft_stress.metrics | {"checkpoint_path": str(tft_stress.checkpoint_path)}}
         if include_comfort:
@@ -698,7 +694,7 @@ def run_experiment(config_path: str) -> Path:
                 horizon=horizon,
                 window_step=window_step,
                 model_name="tft_comfort",
-                use_profiles=bool(cfg.get("profiles", {}).get("enabled", True)),
+                use_profiles=use_profile_inputs,
             )
             tft_metrics["comfort"] = tft_comfort.metrics | {"checkpoint_path": str(tft_comfort.checkpoint_path)}
         metrics["tft"] = tft_metrics
@@ -706,11 +702,14 @@ def run_experiment(config_path: str) -> Path:
         logger.exception("TFT pipeline failed: %s", exc)
         metrics["tft"] = {"error": str(exc)}
 
-    # Ablation: profiles OFF using XGBoost only for fast comparison.
+    # Ablation: profile input columns OFF using XGBoost only for fast comparison.
     ablation: dict[str, Any] = {}
     try:
         off_cfg = json.loads(json.dumps(cfg))
-        off_cfg["profiles"]["enabled"] = False
+        off_cfg.setdefault("profiles", {})
+        off_cfg["profiles"]["include_calibration_features"] = False
+        off_cfg["profiles"]["include_role_metadata"] = False
+        off_cfg["profiles"]["include_experience_metadata"] = False
         off_xgb = train_xgb_tasks(
             cfg=off_cfg,
             feature_matrix=X_all,
@@ -796,8 +795,9 @@ def run_experiment(config_path: str) -> Path:
             cfg.get("dataset", {}).get("report_name", cfg.get("dataset", {}).get("name", "unknown"))
         ),
         split_desc=split_desc,
-        profiles_enabled=bool(cfg.get("profiles", {}).get("enabled", True)),
+        profiles_enabled=use_profile_inputs,
     )
+    _write_profile_ablation_report(run_paths.root, metrics)
     logger.info("Experiment complete. Artifacts saved to %s", run_paths.root)
     return run_paths.root
 

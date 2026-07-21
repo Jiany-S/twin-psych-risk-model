@@ -42,13 +42,12 @@ split:
   seed: 42
 
 profiles:
-  enabled: true
-  warmup_steps: 60
-  use_static_meta: false
+  include_calibration_features: false
+  include_role_metadata: false
+  include_experience_metadata: false
 
 normalization:
-  mode: online
-  warmup_steps: 60
+  mode: calibration
 
 features:
   timestamp: timestamp

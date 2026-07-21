@@ -13,9 +13,9 @@ Scope: `src/run_experiment.py`, dataset loaders, windowing/features, worker prof
 | WESAD time base | Native WESAD pickle rows are chest sample rows after truncating channels to shared length; configs treat them as 4 Hz and divide by `downsample_factor`. | High: reported seconds, HRV peak distances, forecast horizons, and stride are wrong for native pickles. |
 | WESAD downsampling | Loader physically keeps every `downsample_factor`-th row, and `run_experiment.py` also divides `task.sampling_rate_hz` by that same factor. | High: if `sampling_rate_hz` is already intended as post-downsample rate, this double-adjusts; if intended as raw WESAD, it is still wrong because native chest is not 4 Hz. |
 | MultiPhysio temporal rows | Each row is already a 60-second precomputed feature window. The pipeline windows those feature rows again. | Medium/high: configured windows are windows of 60-second summaries, not raw physiological windows. |
-| Profile ablations | Several profile-on/off runs change normalization mode or add no static features, so "profiles on vs off" is not consistently isolating profile information. | High: profile claims are not reliable without matched config pairs. |
-| TFT subject holdout | TFT uses `worker_id` as a static categorical and inserts artificial training rows for validation/test workers. | High: held-out subject evaluation is contaminated by test/val subject IDs and fake train samples. |
-| Held-out subject validity | XGBoost subject sets are disjoint; TFT subject sets are disjoint at raw split level but not clean at model-input level because of the encoder workaround. | High for TFT, medium for XGBoost because subject-level prevalence/task composition can dominate. |
+| Profile ablations | Prompt 4 refactored this: normalization, calibration, and profile-vector inputs are independently configured. | Remaining risk: old artifacts before Prompt 4 should not be used for profile claims. |
+| TFT subject holdout | Prompt 4 removed `worker_id` from TFT static covariates and removed artificial validation/test worker rows. | Remaining risk: rerun larger subject-holdout TFT experiments to verify unseen-group behavior and prevalence stability. |
+| Held-out subject validity | XGBoost and TFT subject sets are disjoint at raw split level; Prompt 4 removes direct held-out ID/profile leakage. | Medium: subject-level prevalence/task composition can still dominate. |
 | Metric comparability | Weekly report `2026-04-16` compares runs where test prevalence changed from 25/135 to 96/173 positives. | High: F1/AUPRC/calibration changes cannot be interpreted as pure model improvement. |
 | Dummy prevalence baselines | Metrics include prevalence and class counts but do not explicitly compare AUPRC to prevalence or F1 to trivial always-positive/always-negative baselines. | Medium/high: shifted prevalence can make F1 and AUPRC look better without a better model. |
 
@@ -88,17 +88,17 @@ Effective seconds below are the pipeline's current calculation: `task.sampling_r
    - Source: WESAD loader uses `np.linspace` to reduce rows after downsample.
    - Impact: effective time spacing can become non-uniform and unreported.
 
-6. Profile ablations are not clean.
-   - Source: normalization is always applied in `_profile_transform`; profile flags control static/profile covariates inconsistently.
-   - Impact: profile-on/off metric deltas may reflect normalization changes, not personalization features.
+6. Historical profile ablations before Prompt 4 are not clean.
+   - Current status: Prompt 4 separates `normalization.mode` from optional profile-vector flags.
+   - Impact: old profile-on/off metric deltas may reflect normalization changes, not personalization features.
 
-7. Built-in XGBoost ablation may be identical to the main XGBoost run.
-   - Source: ablation reuses `X_all` already built from the current profile-normalized pipeline and only removes appended static profiles.
-   - Impact: when `use_static_meta: false`, XGBoost profiles-on/off can have the same feature matrix.
+7. Historical built-in XGBoost ablation could be identical to the main XGBoost run.
+   - Current status: Prompt 4 tests prove profile-on and profile-off matrices differ when profile columns are enabled.
+   - Impact: old `use_static_meta: false` ablations should not be cited as profile evidence.
 
-8. TFT subject-holdout leakage risk.
-   - Source: `worker_id` is a static categorical; unseen validation/test workers are added as artificial training rows.
-   - Impact: the model and encoders are exposed to held-out subject IDs before evaluation.
+8. Historical TFT subject-holdout leakage risk.
+   - Current status: Prompt 4 removes `worker_id` from static categoricals and removes artificial validation/test worker rows.
+   - Impact: larger subject-holdout TFT runs still need to be rerun before making generalization claims.
 
 9. TFT stride does not exactly match XGBoost window semantics.
    - Source: XGBoost builds windows with `window_step`; TFT first strides raw rows when `window_step > 1`, then lets `TimeSeriesDataSet` create adjacent windows.
@@ -113,7 +113,7 @@ Effective seconds below are the pipeline's current calculation: `task.sampling_r
 1. Define canonical time units per dataset: native WESAD raw Hz, post-downsample Hz, MultiPhysio feature-window cadence.
 2. Remove double downsample/rate adjustment by making `sampling_rate_hz` either raw input rate or post-loader effective rate, never both.
 3. Make WESAD loader resample aligned channels explicitly or document that only same-rate chest signals are supported.
-4. Remove `worker_id` from TFT static categoricals for subject-holdout, or use a true unknown-worker bucket without artificial val/test rows.
+4. Rerun TFT subject-holdout after the Prompt 4 worker-ID leakage fix and verify unseen-group behavior.
 5. Rebuild profile ablation configs so only one variable family changes: normalization fixed, static/profile covariates toggled.
 6. Add dummy baselines to `metrics.json`: prevalence AUPRC, always-positive F1, always-negative accuracy, validation/test prevalence.
 7. Align XGBoost and TFT stride/window semantics and report each model's actual evaluated sample count.

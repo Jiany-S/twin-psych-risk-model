@@ -113,9 +113,8 @@ def train_tft_task(
         tft_cfg["gpus"] = 0
     for df in (train_df, val_df, test_df):
         df["worker_id"] = df["worker_id"].astype(str)
-        df["specialization_index"] = df["specialization_index"].astype(str)
-        df["experience_level"] = df["experience_level"].astype(str)
-        df["task_phase"] = df["task_phase"].astype(str)
+        if "task_phase" in df.columns:
+            df["task_phase"] = df["task_phase"].astype(str)
         # Reindex time_idx per worker to ensure contiguous steps for TFT.
         df[schema.time_idx] = df.groupby("worker_id", observed=True).cumcount().astype(int)
     if window_step > 1:
@@ -129,25 +128,15 @@ def train_tft_task(
         val_df = _stride_rows(val_df, window_step)
         test_df = _stride_rows(test_df, window_step)
 
-    # Ensure validation/test categorical values are known to encoders to avoid unknown-class warnings.
-    categorical_cols = ["worker_id", "specialization_index", "experience_level", "task_phase"]
-    unseen_workers = sorted(set(val_df["worker_id"]).union(set(test_df["worker_id"])) - set(train_df["worker_id"]))
-    if unseen_workers:
-        base = train_df.iloc[[0]].copy()
-        extra_rows: list[pd.DataFrame] = []
-        for worker in unseen_workers:
-            row = base.copy()
-            row["worker_id"] = str(worker)
-            row[schema.time_idx] = 0
-            row[target_col] = 0.0
-            for col in categorical_cols:
-                if col not in row.columns:
-                    row[col] = "UNK"
-            for col in schema.physiology:
-                if col in row.columns:
-                    row[col] = 0.0
-            extra_rows.append(row)
-        train_df = pd.concat([train_df, *extra_rows], ignore_index=True)
+    profile_cols = list(cfg.get("profiles", {}).get("tft_static_real_cols", []))
+    if not profile_cols and use_profiles:
+        profile_cols = [c for c in train_df.columns if c.startswith("calib_") or c in {"role_metadata", "experience_metadata"}]
+    profile_cols = [c for c in profile_cols if c in train_df.columns]
+    for df in (train_df, val_df, test_df):
+        for col in profile_cols:
+            if col not in df.columns:
+                df[col] = 0.0
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
 
     with warnings.catch_warnings():
         warnings.filterwarnings(
@@ -164,6 +153,9 @@ def train_tft_task(
             horizon=horizon,
             use_profiles=use_profiles,
             known_categoricals=["task_phase"],
+            static_reals=profile_cols if use_profiles else [],
+            time_varying_known_reals=[],
+            static_categoricals=[],
         )
         # Use predict=False so we evaluate on all available windows, not only the last per series.
         test_ds = train_ds.from_dataset(train_ds, test_df, predict=False, stop_randomization=True)

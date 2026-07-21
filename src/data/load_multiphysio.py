@@ -267,7 +267,8 @@ def load_multiphysio_dataset(
         merged[schema.experience_col] = pd.to_numeric(merged["Experience"], errors="coerce").fillna(1).astype(int)
     else:
         merged[schema.experience_col] = 1
-    merged[schema.specialization_col] = pd.Categorical(merged["class_norm"]).codes.astype(int)
+    # MultiPhysio labels include experience, but no worker role/specialization metadata.
+    merged[schema.specialization_col] = -1
 
     keep_cols = [
         schema.worker_id,

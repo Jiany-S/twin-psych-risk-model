@@ -39,15 +39,13 @@ split:
   test_ratio: 0.15
   seed: 42
 
-profile:
-  ema_alpha: 0.1
-  safe_col: null
-
 profiles:
-  enabled: true
-  mode: online
-  warmup_steps: 60
-  use_static_meta: false
+  include_calibration_features: false
+  include_role_metadata: false
+  include_experience_metadata: false
+
+normalization:
+  mode: calibration
 
 features:
   timestamp: timestamp

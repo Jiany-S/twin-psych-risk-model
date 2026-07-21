@@ -40,13 +40,20 @@ split:
   test_ratio: 0.15
   seed: 42
 
-profile:
-  ema_alpha: 0.1
-  safe_col: null
+normalization:
+  mode: global  # global | calibration
+
+calibration:
+  protocol_labels: [baseline, rest]
+  task_phases: []
+  max_rows_per_subject: 120
+  include_median: true
+  robust_scale: iqr
 
 profiles:
-  enabled: true
-  use_static_meta: true
+  include_calibration_features: false
+  include_role_metadata: false
+  include_experience_metadata: false
 
 features:
   timestamp: timestamp
