@@ -256,6 +256,14 @@ def train_tft_task(
         metrics["test_positive_count_optimal"] = int(np.sum(predictions >= chosen_thr))
         metrics["pred_min"] = float(np.min(predictions))
         metrics["pred_max"] = float(np.max(predictions))
+        pred_dir = run_dir / "predictions"
+        pred_dir.mkdir(parents=True, exist_ok=True)
+        prob_path = pred_dir / f"{model_name}_primary_probs.npy"
+        pred_path = pred_dir / f"{model_name}_primary_predictions.npy"
+        np.save(prob_path, predictions)
+        np.save(pred_path, (predictions >= chosen_thr).astype(np.float32))
+        metrics["probabilities_path"] = str(prob_path)
+        metrics["predictions_path"] = str(pred_path)
     else:
         metrics = regression_metrics(y_true, predictions)
     metrics["n_predictions"] = int(len(predictions))

@@ -75,6 +75,30 @@ synthetic:
   missing_rate: 0.02
   seed: 123
 
+models:
+  run_dummy: true
+  run_logistic: true
+  run_random_forest: true
+  run_xgb: true
+  run_tft: true
+
+dummy:
+  strategies: [most_frequent, stratified]
+
+logistic_regression:
+  C: 1.0
+  max_iter: 1000
+  solver: lbfgs
+  class_weight: balanced
+  calibration: none  # none | platt
+
+random_forest:
+  n_estimators: 200
+  max_depth: null
+  min_samples_leaf: 1
+  class_weight: balanced
+  n_jobs: -1
+
 xgboost:
   max_depth: 4
   n_estimators: 200

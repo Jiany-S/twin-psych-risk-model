@@ -11,6 +11,7 @@ from sklearn.metrics import (
     brier_score_loss,
     confusion_matrix,
     f1_score,
+    balanced_accuracy_score,
     precision_score,
     recall_score,
     roc_auc_score,
@@ -167,22 +168,28 @@ def classification_metrics(y_true: np.ndarray, probs: np.ndarray, chosen_thresho
     ece = expected_calibration_error(probs, y_true, bins=15)
     default_pos_rate = float(np.mean(y_pred_default))
     optimal_pos_rate = float(np.mean(y_pred_optimal))
+    cm_opt = confusion_matrix(y_true, y_pred_optimal, labels=[0, 1])
+    tn, fp, fn, tp = cm_opt.ravel()
+    specificity = float(tn / max(1, tn + fp))
 
     metrics = {
         "auroc": float(auc),
         "auprc": float(auprc),
         "accuracy": float(accuracy_score(y_true, y_pred_optimal)),
+        "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred_optimal)),
         "f1": float(f1_score(y_true, y_pred_optimal, zero_division=0)),
         "precision": float(precision_score(y_true, y_pred_optimal, zero_division=0)),
         "recall": float(recall_score(y_true, y_pred_optimal, zero_division=0)),
+        "specificity": specificity,
         "brier": float(brier),
         "ece": float(ece),
         "confusion_matrix_default": confusion_matrix(y_true, y_pred_default, labels=[0, 1]).tolist(),
         "optimal_threshold": float(threshold),
         "chosen_threshold": float(threshold),
-        "confusion_matrix_optimal": confusion_matrix(y_true, y_pred_optimal, labels=[0, 1]).tolist(),
+        "confusion_matrix_optimal": cm_opt.tolist(),
         "default_positive_rate": default_pos_rate,
         "optimal_positive_rate": optimal_pos_rate,
+        "predicted_positive_rate": optimal_pos_rate,
         "class_counts": {str(k): int((y_true == k).sum()) for k in np.unique(y_true)},
     }
     metrics.update(_binary_split_stats(y_true))

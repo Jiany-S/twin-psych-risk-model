@@ -133,9 +133,18 @@ def train_xgb_tasks(
     stress_metrics["pred_max"] = float(np.max(stress_pred))
     stress_metrics["n_predictions"] = int(len(stress_pred))
     stress_metrics["n_targets"] = int(len(y_stress[test_idx]))
+    stress_metrics["model_family"] = "xgboost_boosted_tree"
     stress_imp = _importance(stress.model, names, cfg["report"]["top_k_features"])
     stress_path = run_dir / "models" / f"{model_prefix}_stress.pkl"
     joblib.dump({"model": stress.model, "calibrator": stress.calibrator, "feature_names": names}, stress_path)
+    pred_dir = run_dir / "predictions"
+    pred_dir.mkdir(parents=True, exist_ok=True)
+    prob_path = pred_dir / f"{model_prefix}_primary_probs.npy"
+    pred_path = pred_dir / f"{model_prefix}_primary_predictions.npy"
+    np.save(prob_path, stress_pred)
+    np.save(pred_path, (stress_pred >= chosen_thr).astype(np.float32))
+    stress_metrics["probabilities_path"] = str(prob_path)
+    stress_metrics["predictions_path"] = str(pred_path)
     artifacts["stress"] = XGBTaskArtifacts(
         predictions=stress_pred,
         metrics=stress_metrics,

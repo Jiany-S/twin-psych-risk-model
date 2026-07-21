@@ -144,6 +144,30 @@ task:
   sampling_rate_hz: 4.0
 ```
 
+## Benchmark Models
+The primary classification target is evaluated with a benchmark hierarchy:
+
+```yaml
+models:
+  run_dummy: true
+  run_logistic: true
+  run_random_forest: true
+  run_xgb: true
+  run_tft: true
+
+dummy:
+  strategies: [most_frequent, stratified]
+
+logistic_regression:
+  class_weight: balanced
+  calibration: none  # none | platt
+
+random_forest:
+  class_weight: balanced
+```
+
+All tabular classifiers use the same engineered windows/features, train-fitted imputation, and validation-only threshold selection. XGBoost remains the strong boosted-tree benchmark. Logistic regression uses train-only scaling, and optional Platt calibration is fit on validation probabilities only.
+
 ## WESAD Pilot (8 Subjects)
 Prepare a local subset:
 ```bash

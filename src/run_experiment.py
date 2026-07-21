@@ -30,6 +30,7 @@ from .training.plotting import (
     plot_roc,
     plot_timeseries,
 )
+from .training.baseline_train import train_classifier_baselines
 from .training.tft_train import train_tft_task
 from .training.xgb_train import train_xgb_tasks
 from .utils.io import load_merged_yaml, load_yaml, save_json
@@ -344,19 +345,19 @@ def _comparison(metrics: dict[str, Any], include_comfort: bool) -> dict[str, Any
             ptr = ptr[key]
         return ptr
 
+    model_scores = {}
+    for model_name, block in metrics.items():
+        if isinstance(block, dict) and isinstance(block.get("stress"), dict) and "auroc" in block["stress"]:
+            score = float(block["stress"].get("auroc", np.nan))
+            if np.isfinite(score):
+                model_scores[model_name] = score
+    winner = max(model_scores, key=model_scores.get) if model_scores else "n/a"
     xgb_auroc = float(get(("xgboost", "stress", "auroc"), np.nan))
     tft_auroc = float(get(("tft", "stress", "auroc"), np.nan))
-    if np.isfinite(xgb_auroc) and np.isfinite(tft_auroc):
-        winner = "xgboost" if xgb_auroc >= tft_auroc else "tft"
-    elif np.isfinite(xgb_auroc):
-        winner = "xgboost"
-    elif np.isfinite(tft_auroc):
-        winner = "tft"
-    else:
-        winner = "n/a"
     result = {
         "primary_winner_by_auroc": winner,
         "delta_primary_auroc": float(tft_auroc - xgb_auroc),
+        "primary_auroc_by_model": model_scores,
     }
     if include_comfort:
         result["comfort_winner_by_rmse"] = (
@@ -391,8 +392,26 @@ def _write_results_md(
     step = int(cfg.get("task", {}).get("window_step", 1))
     test_balance = metrics.get("class_balance", {}).get("test", {})
     threshold_policy = metrics.get("xgboost", {}).get("stress", {}).get("threshold_policy", "n/a")
-    xgb = metrics.get("xgboost", {}).get("stress", {})
-    tft = metrics.get("tft", {}).get("stress", {})
+    model_rows = []
+    for model_name, block in metrics.items():
+        if isinstance(block, dict) and isinstance(block.get("stress"), dict) and "auroc" in block["stress"]:
+            vals = block["stress"]
+            model_rows.append(
+                "| {name} | {auroc} | {auprc} | {f1} | {precision} | {recall} | {specificity} | {balanced_accuracy} | {brier} | {ece} | {prevalence} | {predicted_positive_rate} |".format(
+                    name=model_name,
+                    auroc=vals.get("auroc", "n/a"),
+                    auprc=vals.get("auprc", "n/a"),
+                    f1=vals.get("f1", "n/a"),
+                    precision=vals.get("precision", "n/a"),
+                    recall=vals.get("recall", "n/a"),
+                    specificity=vals.get("specificity", "n/a"),
+                    balanced_accuracy=vals.get("balanced_accuracy", "n/a"),
+                    brier=vals.get("brier", "n/a"),
+                    ece=vals.get("ece", "n/a"),
+                    prevalence=vals.get("prevalence", "n/a"),
+                    predicted_positive_rate=vals.get("predicted_positive_rate", "n/a"),
+                )
+            )
     lines = [
         "# Experiment Results",
         "",
@@ -413,10 +432,9 @@ def _write_results_md(
         f"- TFT sanity note: {tft_warning}" if tft_warning else "- TFT sanity note: n/a",
         "",
         "## Primary Target Comparison Table",
-        "| Model | AUROC | AUPRC | F1 | Precision | Recall | Brier | ECE |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
-        f"| XGBoost | {xgb.get('auroc', 'n/a')} | {xgb.get('auprc', 'n/a')} | {xgb.get('f1', 'n/a')} | {xgb.get('precision', 'n/a')} | {xgb.get('recall', 'n/a')} | {xgb.get('brier', 'n/a')} | {xgb.get('ece', 'n/a')} |",
-        f"| TFT | {tft.get('auroc', 'n/a')} | {tft.get('auprc', 'n/a')} | {tft.get('f1', 'n/a')} | {tft.get('precision', 'n/a')} | {tft.get('recall', 'n/a')} | {tft.get('brier', 'n/a')} | {tft.get('ece', 'n/a')} |",
+        "| Model | AUROC | AUPRC | F1 | Precision | Recall | Specificity | Balanced Acc. | Brier | ECE | Prevalence | Pred. + Rate |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        *(model_rows or ["| n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |"]),
         "",
         "## Metrics JSON Snapshot",
         "```json",
@@ -585,8 +603,37 @@ def run_experiment(config_path: str) -> Path:
         "feature_metadata": feature_metadata,
     }
     xgb_out = None
+    baseline_out = {}
     tft_stress = None
     tft_comfort = None
+
+    try:
+        baseline_out = train_classifier_baselines(
+            cfg=cfg,
+            feature_matrix=X_all,
+            feature_names=feat_names,
+            y_primary=y_stress_all,
+            meta=meta_all,
+            static_profiles=static_profiles,
+            split_indices=split_idx,
+            run_dir=run_paths.root,
+            use_profiles=bool(cfg.get("profiles", {}).get("enabled", True)),
+        )
+        for model_name, artifact in baseline_out.items():
+            metrics[model_name] = {"stress": artifact.metrics | {"model_path": str(artifact.model_path)}}
+            if artifact.feature_importance:
+                importance_path = run_paths.root / "models" / f"{model_name}_feature_importance.json"
+                importance_path.write_text(json.dumps(artifact.feature_importance, indent=2), encoding="utf-8")
+                metrics[model_name]["stress"]["feature_importance_path"] = str(importance_path)
+                plot_feature_importance(
+                    np.array([item["importance"] for item in artifact.feature_importance]),
+                    [item["feature"] for item in artifact.feature_importance],
+                    run_paths.plots / f"feature_importance_{model_name}_primary.png",
+                    top_k=cfg["report"]["top_k_features"],
+                )
+    except Exception as exc:
+        logger.exception("Classical baseline suite failed: %s", exc)
+        metrics["baselines"] = {"error": str(exc)}
 
     try:
         if not run_xgb:
@@ -688,12 +735,9 @@ def run_experiment(config_path: str) -> Path:
     # Plots
     y_stress_test = y_stress_all[split_idx["test"]]
     y_comfort_test = y_comfort_all[split_idx["test"]]
+    primary_plot_series = [(name, artifact.predictions) for name, artifact in baseline_out.items()]
     if xgb_out is not None:
-        plot_roc(y_stress_test, [("XGBoost", xgb_out["stress"].predictions)], run_paths.plots / "roc_curve_stress.png")
-        plot_pr(y_stress_test, [("XGBoost", xgb_out["stress"].predictions)], run_paths.plots / "pr_curve_stress.png")
-        plot_calibration(
-            y_stress_test, [("XGBoost", xgb_out["stress"].predictions)], run_paths.plots / "calibration_stress.png"
-        )
+        primary_plot_series.append(("xgboost", xgb_out["stress"].predictions))
         cm = np.array(metrics.get("xgboost", {}).get("stress", {}).get("confusion_matrix_default", [[0, 0], [0, 0]]))
         plot_confusion_matrix(cm, run_paths.plots / "confusion_stress.png")
         plot_timeseries(
@@ -711,11 +755,28 @@ def run_experiment(config_path: str) -> Path:
             )
 
     if tft_stress is not None and len(tft_stress.targets) == len(tft_stress.predictions):
-        plot_roc(
-            tft_stress.targets,
-            [("TFT", tft_stress.predictions)],
-            run_paths.plots / "roc_curve_stress_tft.png",
-        )
+        if len(tft_stress.predictions) == len(y_stress_test):
+            primary_plot_series.append(("tft", tft_stress.predictions))
+        else:
+            plot_roc(
+                tft_stress.targets,
+                [("tft", tft_stress.predictions)],
+                run_paths.plots / "roc_curve_stress_tft.png",
+            )
+            plot_pr(
+                tft_stress.targets,
+                [("tft", tft_stress.predictions)],
+                run_paths.plots / "pr_curve_stress_tft.png",
+            )
+            plot_calibration(
+                tft_stress.targets,
+                [("tft", tft_stress.predictions)],
+                run_paths.plots / "calibration_stress_tft.png",
+            )
+
+    plot_roc(y_stress_test, primary_plot_series, run_paths.plots / "roc_curve_stress.png")
+    plot_pr(y_stress_test, primary_plot_series, run_paths.plots / "pr_curve_stress.png")
+    plot_calibration(y_stress_test, primary_plot_series, run_paths.plots / "calibration_stress.png")
 
     metrics["comparison"] = _comparison(metrics, include_comfort=include_comfort)
     metrics["ablation_profiles"] = ablation
