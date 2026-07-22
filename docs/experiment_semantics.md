@@ -47,7 +47,7 @@ For MultiPhysio, the current physiology columns are precomputed 60-second featur
 | `multiphysio_smoke.yaml` | 60 s precomputed feature rows; primary target `cognitive_load_binary` | 6 rows / about 6 min | 1 row / 60 s | 1 row / 60 s |
 | `multiphysio_full.yaml` | 60 s precomputed feature rows; primary target `cognitive_load_binary` | 10 rows / about 10 min | 1 row / 60 s | 1 row / 60 s |
 
-Current window label rule in `build_windows`: for a window `[start, end)`, the label is taken from `end + horizon_steps - 1`. Therefore `horizon_steps: 1` predicts the first row after the encoder window.
+Current window label rule in `build_windows`: durations are converted to row counts centrally, and for a window `[start, end)`, the label is taken from `end + horizon_steps - 1`. The label timestamp must equal the final observation timestamp plus `forecast_horizon_seconds`.
 
 ## Profile Behavior
 

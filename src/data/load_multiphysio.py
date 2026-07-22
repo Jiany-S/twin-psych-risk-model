@@ -256,7 +256,8 @@ def load_multiphysio_dataset(
     merged[schema.worker_id] = merged["ID"]
     merged[schema.protocol_label] = merged["class_norm"]
     merged[schema.time_idx] = merged.groupby("ID", observed=True).cumcount().astype(int)
-    merged[schema.timestamp] = merged[schema.time_idx].astype(float)
+    row_interval_seconds = float(cfg.get("row_interval_seconds", 60.0))
+    merged[schema.timestamp] = merged[schema.time_idx].astype(float) * row_interval_seconds
 
     for internal, source in feature_mapping.items():
         merged[internal] = pd.to_numeric(merged[source], errors="coerce").replace([np.inf, -np.inf], np.nan)
@@ -301,5 +302,15 @@ def load_multiphysio_dataset(
         "feature_kind": "precomputed_60s",
         "feature_mapping": feature_mapping,
         "source_file": str(bio_path),
+        "representation": "precomputed_features",
+        "row_interval_seconds": row_interval_seconds,
+        "row_semantics": "one row represents one 60-second bio feature interval from bio_features_60s.csv",
+    }
+    out.attrs["time_metadata"] = {
+        "representation": "precomputed_features",
+        "row_interval_seconds": row_interval_seconds,
+        "effective_sampling_rate_hz": 1.0 / row_interval_seconds,
+        "supports_subsecond_detection": False,
+        "supports_5s_detection": row_interval_seconds <= 5.0,
     }
     return out

@@ -120,6 +120,10 @@ def build_windows(
     window_length: int,
     horizon_steps: int,
     window_step: int = 1,
+    row_interval_seconds: float | None = None,
+    context_seconds: float | None = None,
+    forecast_horizon_seconds: float | None = None,
+    inference_stride_seconds: float | None = None,
 ) -> WindowedData:
     feature_cols = list(schema.physiology) + list(schema.robot_context)
     for optional_signal in ("resp", "accel"):
@@ -134,24 +138,63 @@ def build_windows(
     metas: list[dict[str, Any]] = []
     for worker_id, worker_df in df.groupby(schema.worker_id, observed=True):
         worker_df = worker_df.sort_values(schema.time_idx).reset_index(drop=True)
-        values = worker_df[feature_cols].to_numpy(dtype=np.float32, copy=False)
-        stress = worker_df[schema.stress_target].to_numpy(dtype=float)
-        comfort = worker_df[schema.comfort_target].to_numpy(dtype=float)
-        times = worker_df[schema.time_idx].to_numpy(dtype=int)
-        for start in range(0, len(worker_df) - window_length - horizon_steps + 1, max(1, window_step)):
-            end = start + window_length
-            label_idx = end + horizon_steps - 1
-            windows.append(values[start:end])
-            y_stress.append(stress[label_idx])
-            y_comfort.append(comfort[label_idx])
-            metas.append(
-                {
-                    "worker_id": str(worker_id),
-                    "start_idx": int(times[start]),
-                    "end_idx": int(times[end - 1]),
-                    "label_time_idx": int(times[label_idx]),
-                }
-            )
+        timestamps_all = pd.to_numeric(worker_df[schema.timestamp], errors="coerce").to_numpy(dtype=float)
+        if row_interval_seconds is not None and len(timestamps_all) > 1:
+            diffs = np.diff(timestamps_all)
+            breaks = np.where(~np.isclose(diffs, row_interval_seconds, atol=max(1e-5, row_interval_seconds * 1e-4)))[0] + 1
+            segment_bounds = np.r_[0, breaks, len(worker_df)]
+        else:
+            segment_bounds = np.array([0, len(worker_df)])
+        for seg_start, seg_stop in zip(segment_bounds[:-1], segment_bounds[1:]):
+            segment_df = worker_df.iloc[int(seg_start):int(seg_stop)].reset_index(drop=True)
+            if len(segment_df) < window_length + horizon_steps:
+                continue
+            values = segment_df[feature_cols].to_numpy(dtype=np.float32, copy=False)
+            stress = segment_df[schema.stress_target].to_numpy(dtype=float)
+            comfort = segment_df[schema.comfort_target].to_numpy(dtype=float)
+            times = segment_df[schema.time_idx].to_numpy(dtype=int)
+            timestamps = pd.to_numeric(segment_df[schema.timestamp], errors="coerce").to_numpy(dtype=float)
+            for start in range(0, len(segment_df) - window_length - horizon_steps + 1, max(1, window_step)):
+                end = start + window_length
+                label_idx = end + horizon_steps - 1
+                if row_interval_seconds is not None:
+                    observed_context = timestamps[end - 1] - timestamps[start] + row_interval_seconds
+                    observed_horizon = timestamps[label_idx] - timestamps[end - 1]
+                    expected_context = context_seconds if context_seconds is not None else window_length * row_interval_seconds
+                    expected_horizon = (
+                        forecast_horizon_seconds if forecast_horizon_seconds is not None else horizon_steps * row_interval_seconds
+                    )
+                    if not np.isclose(observed_context, expected_context, atol=max(1e-5, row_interval_seconds * 1e-4)):
+                        raise ValueError(
+                            f"Window context duration mismatch for worker {worker_id}: "
+                            f"observed {observed_context}, expected {expected_context}."
+                        )
+                    if not np.isclose(observed_horizon, expected_horizon, atol=max(1e-5, row_interval_seconds * 1e-4)):
+                        raise ValueError(
+                            f"Label timestamp is not exactly after the observation window by the configured horizon: "
+                            f"observed {observed_horizon}, expected {expected_horizon}."
+                        )
+                windows.append(values[start:end])
+                y_stress.append(stress[label_idx])
+                y_comfort.append(comfort[label_idx])
+                metas.append(
+                    {
+                        "worker_id": str(worker_id),
+                        "start_idx": int(times[start]),
+                        "end_idx": int(times[end - 1]),
+                        "label_time_idx": int(times[label_idx]),
+                        "start_timestamp": float(timestamps[start]),
+                        "end_timestamp": float(timestamps[end - 1]),
+                        "label_timestamp": float(timestamps[label_idx]),
+                        "context_seconds": float(context_seconds if context_seconds is not None else window_length),
+                        "forecast_horizon_seconds": float(
+                            forecast_horizon_seconds if forecast_horizon_seconds is not None else horizon_steps
+                        ),
+                        "inference_stride_seconds": float(
+                            inference_stride_seconds if inference_stride_seconds is not None else window_step
+                        ),
+                    }
+                )
 
     if not windows:
         raise ValueError("Insufficient data to build windows. Check window_length and horizon_steps.")
@@ -185,10 +228,18 @@ def engineer_window_features(
 
     if mode != "raw_signals":
         raise ValueError(f"Unsupported feature engineering mode: {mode!r}. Expected 'raw_signals' or 'precomputed'.")
+    if sampling_rate_hz <= 0:
+        raise ValueError("Raw signal feature extraction requires a positive effective sampling rate.")
     if "ecg" not in cols or "eda" not in cols or "temp" not in cols:
         raise ValueError(
             "Raw signal feature extraction requires physiology columns ['ecg', 'eda', 'temp']; "
             f"got {list(schema.physiology)}."
+        )
+    duration_seconds = windows.shape[1] / sampling_rate_hz if windows.ndim >= 2 else 0.0
+    if duration_seconds < 4.0:
+        raise ValueError(
+            "Raw ECG/HRV feature extraction requires at least 4 seconds of context; "
+            f"got {duration_seconds:.3f}s at {sampling_rate_hz:.3f} Hz."
         )
 
     ecg_idx = cols.index("ecg")

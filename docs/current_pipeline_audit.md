@@ -10,8 +10,8 @@ Scope: `src/run_experiment.py`, dataset loaders, windowing/features, worker prof
 | --- | --- | --- |
 | MultiPhysio target semantics | Phase 2 corrected this: STAI maps to stress/state anxiety, NASA-TLX maps to cognitive workload, SAM Valence maps to comfort proxy, and SAM Arousal maps to arousal. | Remaining risk: historical runs before Phase 2 mislabeled NASA-TLX workload as stress. |
 | MultiPhysio physiology mapping | Phase 2 corrected this: `EMG_RMSE` maps to `emg_rmse`; no `temp` column is fabricated for MultiPhysio. | Remaining risk: historical runs before Phase 2 mislabeled EMG as temperature. |
-| WESAD time base | Native WESAD pickle rows are chest sample rows after truncating channels to shared length; configs treat them as 4 Hz and divide by `downsample_factor`. | High: reported seconds, HRV peak distances, forecast horizons, and stride are wrong for native pickles. |
-| WESAD downsampling | Loader physically keeps every `downsample_factor`-th row, and `run_experiment.py` also divides `task.sampling_rate_hz` by that same factor. | High: if `sampling_rate_hz` is already intended as post-downsample rate, this double-adjusts; if intended as raw WESAD, it is still wrong because native chest is not 4 Hz. |
+| WESAD time base | Prompt 5 refactored this: native WESAD signals are explicitly resampled from real source rates to `stream.target_sampling_rate_hz`; timestamps are seconds. | Remaining risk: historical artifacts before Prompt 5 used incorrect reported seconds. |
+| WESAD downsampling | Prompt 5 removed `dataset.downsample_factor` from configs and no longer divides sampling rate twice. | Remaining risk: old configs/artifacts with downsample factors should not be cited. |
 | MultiPhysio temporal rows | Each row is already a 60-second precomputed feature window. The pipeline windows those feature rows again. | Medium/high: configured windows are windows of 60-second summaries, not raw physiological windows. |
 | Profile ablations | Prompt 4 refactored this: normalization, calibration, and profile-vector inputs are independently configured. | Remaining risk: old artifacts before Prompt 4 should not be used for profile claims. |
 | TFT subject holdout | Prompt 4 removed `worker_id` from TFT static covariates and removed artificial validation/test worker rows. | Remaining risk: rerun larger subject-holdout TFT experiments to verify unseen-group behavior and prevalence stability. |
@@ -49,7 +49,7 @@ Scope: `src/run_experiment.py`, dataset loaders, windowing/features, worker prof
 
 ## Config Audit
 
-Effective seconds below are the pipeline's current calculation: `task.sampling_rate_hz / dataset.downsample_factor` when a downsample factor exists. For WESAD native pickles, these reported seconds should be treated as unreliable because the base rate is not 4 Hz.
+Effective seconds below were recorded during the original audit before Prompt 5. Current configs use `stream.*` and duration-based `task.*` fields; see `docs/time_semantics.md`.
 
 | Config | Dataset | Split | Models | Target | Effective Hz | Window | Horizon | Prediction stride | Profiles | Normalization |
 | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |
@@ -76,17 +76,17 @@ Effective seconds below are the pipeline's current calculation: `task.sampling_r
    - Current status: fixed in code/config; NASA-TLX is now `cognitive_load`/`cognitive_load_binary`, and STAI is `stress`.
    - Impact: old reports and artifacts must be relabeled as workload benchmarks.
 
-3. WESAD time units are not trustworthy.
-   - Source: WESAD loader creates `time_idx = np.arange(n)`, then config uses `sampling_rate_hz: 4.0` and physical row downsampling.
-   - Impact: reported observation windows and horizons are not real seconds for native WESAD.
+3. Historical WESAD time units before Prompt 5 are not trustworthy.
+   - Current status: Prompt 5 uses explicit resampling and duration-based windows.
+   - Impact: old reported observation windows and horizons are not real seconds for native WESAD.
 
-4. Downsampling semantics are conflated.
-   - Source: WESAD loader applies row-stride downsampling; `run_experiment.py` divides the configured sampling rate again.
-   - Impact: feature extraction and result summaries can use the wrong rate.
+4. Historical downsampling semantics were conflated.
+   - Current status: Prompt 5 deprecates `dataset.downsample_factor`; `stream.target_sampling_rate_hz` is the single resampling control.
+   - Impact: old feature extraction and result summaries can use the wrong rate.
 
-5. `max_rows_per_subject` is another sampling operation.
-   - Source: WESAD loader uses `np.linspace` to reduce rows after downsample.
-   - Impact: effective time spacing can become non-uniform and unreported.
+5. `max_rows_per_subject` is no longer treated as resampling.
+   - Current status: Prompt 5 uses only a contiguous debug cap after explicit resampling.
+   - Impact: old `np.linspace`-capped artifacts can have non-uniform and unreported spacing.
 
 6. Historical profile ablations before Prompt 4 are not clean.
    - Current status: Prompt 4 separates `normalization.mode` from optional profile-vector flags.

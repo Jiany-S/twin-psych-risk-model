@@ -21,6 +21,7 @@ from .data.windowing import (
     create_time_splits,
     engineer_window_features,
 )
+from .data.time_semantics import assert_regular_timestamps, infer_temporal_spec
 from .profiles.worker_profile import (
     CalibrationPolicy,
     apply_calibration_normalization,
@@ -347,12 +348,8 @@ def _write_results_md(
         if str(tft_stress.get("auroc", "")).lower() == "nan":
             tft_warning = "TFT AUROC is NaN; test split may contain a single class or too few windows."
     cfg = metrics.get("config", {})
-    sampling = float(cfg.get("task", {}).get("sampling_rate_hz", 1.0))
-    downsample = int(cfg.get("dataset", {}).get("downsample_factor") or 1)
-    effective_hz = sampling / max(1, downsample)
-    window_len = int(cfg.get("task", {}).get("window_length", 1))
-    horizon = int(cfg.get("task", {}).get("horizon_steps", 1))
-    step = int(cfg.get("task", {}).get("window_step", 1))
+    temporal = metrics.get("time_semantics", {})
+    effective_hz = float(temporal.get("effective_sampling_rate_hz", 1.0))
     test_balance = metrics.get("class_balance", {}).get("test", {})
     threshold_policy = metrics.get("xgboost", {}).get("stress", {}).get("threshold_policy", "n/a")
     model_rows = []
@@ -384,7 +381,11 @@ def _write_results_md(
         f"- Profiles enabled: {profiles_enabled}",
         f"- Task: {metrics.get('task_name', 'stress')}",
         f"- Effective sampling rate (Hz): {effective_hz:.3f}",
-        f"- Window/Horizon/Step (seconds): {window_len/effective_hz:.2f} / {horizon/effective_hz:.2f} / {step/effective_hz:.2f}",
+        "- Context/Horizon/Stride (seconds): "
+        f"{float(temporal.get('context_seconds', 0.0)):.2f} / "
+        f"{float(temporal.get('forecast_horizon_seconds', 0.0)):.2f} / "
+        f"{float(temporal.get('inference_stride_seconds', 0.0)):.2f}",
+        f"- Expected prediction cadence (seconds): {float(temporal.get('expected_prediction_cadence_seconds', 0.0)):.2f}",
         f"- Test prevalence: {test_balance}",
         f"- Threshold policy: {threshold_policy}",
         "",
@@ -455,11 +456,14 @@ def run_experiment(config_path: str) -> Path:
     seed_everything(int(cfg.get("reproducibility", {}).get("seed", cfg["split"]["seed"])))
     schema = DataSchema.from_config(cfg)
     debug = bool(cfg.get("debug", False))
+    temporal = infer_temporal_spec(cfg)
 
     raw_df = load_or_generate(cfg, schema)
     target_metadata = raw_df.attrs.get("target_metadata", {})
     feature_metadata = raw_df.attrs.get("feature_metadata", {})
+    loader_time_metadata = raw_df.attrs.get("time_metadata", {})
     frame = preprocess_dataframe(cfg, raw_df, schema)
+    assert_regular_timestamps(frame, schema.worker_id, schema.timestamp, temporal.row_interval_seconds)
     split_mode = str(cfg.get("split", {}).get("mode", "time")).lower()
     split_desc = "time-per-worker"
     if split_mode == "subject_holdout":
@@ -508,22 +512,26 @@ def run_experiment(config_path: str) -> Path:
         logger.info("Profiles: %s", profiles_info)
     flat_df = pd.concat([train_df, val_df, test_df], ignore_index=True)
 
-    window_length = int(cfg["task"]["window_length"])
-    horizon = int(cfg["task"]["horizon_steps"])
-    window_step = int(cfg.get("task", {}).get("window_step", 1))
+    window_length = temporal.context_steps
+    horizon = temporal.horizon_steps
+    window_step = temporal.stride_steps
     min_split_len = min(
         min(len(part[part[schema.worker_id] == wid]) for wid in part[schema.worker_id].unique())
         for part in (train_df, val_df, test_df)
     )
-    if min_split_len <= horizon:
-        raise ValueError("Split segments are too short for the configured horizon.")
-    if min_split_len <= window_length:
-        adjusted = max(4, min_split_len - horizon - 1)
-        logger.warning("Reducing window_length from %d to %d for available split lengths.", window_length, adjusted)
-        window_length = adjusted
-    train_w = build_windows(train_df, schema, window_length, horizon, window_step=window_step)
-    val_w = build_windows(val_df, schema, window_length, horizon, window_step=window_step)
-    test_w = build_windows(test_df, schema, window_length, horizon, window_step=window_step)
+    if min_split_len <= horizon or min_split_len <= window_length + horizon:
+        raise ValueError(
+            "Split segments are too short for the configured context_seconds and forecast_horizon_seconds."
+        )
+    window_kwargs = {
+        "row_interval_seconds": temporal.row_interval_seconds,
+        "context_seconds": temporal.context_seconds,
+        "forecast_horizon_seconds": temporal.forecast_horizon_seconds,
+        "inference_stride_seconds": temporal.inference_stride_seconds,
+    }
+    train_w = build_windows(train_df, schema, window_length, horizon, window_step=window_step, **window_kwargs)
+    val_w = build_windows(val_df, schema, window_length, horizon, window_step=window_step, **window_kwargs)
+    test_w = build_windows(test_df, schema, window_length, horizon, window_step=window_step, **window_kwargs)
     if debug:
         logger.info(
             "Window counts train=%d val=%d test=%d",
@@ -536,10 +544,7 @@ def run_experiment(config_path: str) -> Path:
     (run_paths.root / "config_resolved.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
     _save_processed(run_paths.root, train_w, val_w, test_w, split_manifest, flat_df)
 
-    sampling_rate = float(cfg["task"].get("sampling_rate_hz", 1.0))
-    downsample_factor = int(cfg.get("dataset", {}).get("downsample_factor") or 1)
-    if downsample_factor > 1:
-        sampling_rate = sampling_rate / downsample_factor
+    sampling_rate = temporal.effective_sampling_rate_hz
     include_freq = bool(cfg["features"].get("hrv", {}).get("include_freq_domain", True))
     scr_threshold = float(cfg["features"].get("eda", {}).get("scr_threshold", 0.05))
     min_scr_distance = int(cfg["features"].get("eda", {}).get("min_scr_distance", 3))
@@ -597,6 +602,8 @@ def run_experiment(config_path: str) -> Path:
         },
         "target_metadata": target_metadata,
         "feature_metadata": feature_metadata,
+        "loader_time_metadata": loader_time_metadata,
+        "time_semantics": temporal.to_dict(),
     }
     xgb_out = None
     baseline_out = {}
@@ -782,6 +789,8 @@ def run_experiment(config_path: str) -> Path:
     profile_stats = _profile_feature_stats(train_df, val_df, test_df)
     save_json(profile_stats, run_paths.root / "profile_feature_stats.json")
     metrics["profile_feature_stats_path"] = str(run_paths.root / "profile_feature_stats.json")
+    save_json(temporal.to_dict(), run_paths.root / "time_semantics.json")
+    metrics["time_semantics_path"] = str(run_paths.root / "time_semantics.json")
     save_json(numeric_diag, run_paths.root / "numeric_feature_stats.json")
     save_json(engineered_diag, run_paths.root / "engineered_feature_stats.json")
     metrics["numeric_feature_stats_path"] = str(run_paths.root / "numeric_feature_stats.json")

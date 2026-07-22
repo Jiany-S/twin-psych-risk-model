@@ -63,10 +63,13 @@ experiment:
   task_name: high versus low cognitive workload from NASA-TLX
 
 task:
-  horizon_steps: 1
-  window_length: 10
-  sampling_rate_hz: 0.0166667
-  window_step: 1
+  context_seconds: 600
+  forecast_horizon_seconds: 60
+  inference_stride_seconds: 60
+
+stream:
+  representation: precomputed_features
+  row_interval_seconds: 60
 
 split:
   mode: subject_holdout

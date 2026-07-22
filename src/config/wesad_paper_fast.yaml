@@ -10,7 +10,6 @@ dataset:
   path: data/wesad/wesad_subset
   format: auto
   subjects: ["S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11", "S13", "S14", "S15", "S16", "S17"]
-  downsample_factor: 10
   max_rows_per_subject: 20000
   stress_include_amusement: true
 
@@ -26,10 +25,14 @@ targets:
     label_col: y_comfort_proxy
 
 task:
-  horizon_steps: 1
-  window_length: 20
-  sampling_rate_hz: 4.0
-  window_step: 5
+  context_seconds: 50
+  forecast_horizon_seconds: 2.5
+  inference_stride_seconds: 12.5
+
+stream:
+  representation: raw_signal
+  source_sampling_rate_hz: 700.0
+  target_sampling_rate_hz: 4.0
 
 split:
   mode: subject_holdout

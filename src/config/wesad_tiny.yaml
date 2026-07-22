@@ -11,7 +11,6 @@ dataset:
   format: auto
   subjects: ["S2"]
   max_rows_per_subject: 20000
-  downsample_factor: 5
 
 reproducibility:
   seed: 42
@@ -25,10 +24,14 @@ targets:
     label_col: y_comfort_proxy
 
 task:
-  horizon_steps: 3
-  window_length: 30
-  sampling_rate_hz: 4.0
-  window_step: 2
+  context_seconds: 37.5
+  forecast_horizon_seconds: 3.75
+  inference_stride_seconds: 2.5
+
+stream:
+  representation: raw_signal
+  source_sampling_rate_hz: 700.0
+  target_sampling_rate_hz: 4.0
 
 split:
   mode: time

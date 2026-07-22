@@ -20,10 +20,14 @@ targets:
     label_col: y_comfort_proxy
 
 task:
-  horizon_steps: 3
-  window_length: 30
-  sampling_rate_hz: 4.0
-  window_step: 1
+  context_seconds: 5.0
+  forecast_horizon_seconds: 0.75
+  inference_stride_seconds: 0.25
+
+stream:
+  representation: raw_signal
+  source_sampling_rate_hz: 4.0
+  target_sampling_rate_hz: 4.0
 
 split:
   mode: time

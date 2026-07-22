@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from scipy.interpolate import interp1d
 
 from .schema import DataSchema
 
@@ -28,6 +29,8 @@ LABEL_MAP_COMFORT = {
     3: 0.7,  # amusement
 }
 PROTOCOL_MAP = {1: "baseline", 2: "stress", 3: "amusement"}
+WESAD_CHEST_RATE_HZ = 700.0
+WESAD_WRIST_RATES_HZ = {"BVP": 64.0, "EDA": 4.0, "TEMP": 4.0, "ACC": 32.0}
 
 
 def _discover_wesad_pickles(path: Path) -> list[Path]:
@@ -61,9 +64,25 @@ def _extract_signal(signal_dict: dict[str, Any], key: str) -> np.ndarray | None:
     return arr.astype(float)
 
 
+def _resample_numeric(values: np.ndarray, source_rate_hz: float, target_ts: np.ndarray) -> np.ndarray:
+    if values.size == 0:
+        return np.full(len(target_ts), np.nan)
+    source_ts = np.arange(len(values), dtype=float) / float(source_rate_hz)
+    if len(source_ts) == 1:
+        return np.full(len(target_ts), float(values[0]))
+    interpolator = interp1d(source_ts, values.astype(float), bounds_error=False, fill_value=(values[0], values[-1]))
+    return interpolator(target_ts).astype(float)
+
+
+def _sample_labels(label: np.ndarray, source_rate_hz: float, target_ts: np.ndarray) -> np.ndarray:
+    source_idx = np.clip(np.round(target_ts * float(source_rate_hz)).astype(int), 0, len(label) - 1)
+    return label[source_idx]
+
+
 def _load_wesad_subject_pickle(
     pkl_path: Path,
     schema: DataSchema,
+    target_sampling_rate_hz: float,
     stress_include_amusement: bool = False,
 ) -> pd.DataFrame:
     with pkl_path.open("rb") as fh:
@@ -79,48 +98,53 @@ def _load_wesad_subject_pickle(
     temp = _extract_signal(chest, "Temp")
     resp = _extract_signal(chest, "Resp")
     acc = _extract_signal(chest, "ACC")
+    ecg_rate = eda_rate = temp_rate = resp_rate = acc_rate = WESAD_CHEST_RATE_HZ
 
     if ecg is None:
         # fallback to wrist BVP proxy when ECG is unavailable
         ecg = _extract_signal(wrist, "BVP")
+        ecg_rate = WESAD_WRIST_RATES_HZ["BVP"]
     if eda is None:
         eda = _extract_signal(wrist, "EDA")
+        eda_rate = WESAD_WRIST_RATES_HZ["EDA"]
     if temp is None:
         temp = _extract_signal(wrist, "TEMP")
+        temp_rate = WESAD_WRIST_RATES_HZ["TEMP"]
     if acc is None:
         acc = _extract_signal(wrist, "ACC")
+        acc_rate = WESAD_WRIST_RATES_HZ["ACC"]
 
     if ecg is None or eda is None or temp is None or label.size == 0:
         raise ValueError(f"Incomplete WESAD subject file: {pkl_path}")
 
-    lengths = [len(label), len(ecg), len(eda), len(temp)]
-    if resp is not None:
-        lengths.append(len(resp))
-    if acc is not None:
-        lengths.append(len(acc))
-    n = min(lengths)
-
-    label = label[:n]
-    ecg = ecg[:n]
-    eda = eda[:n]
-    temp = temp[:n]
-    resp = resp[:n] if resp is not None else np.full(n, np.nan)
-    acc = acc[:n] if acc is not None else np.full(n, np.nan)
+    if target_sampling_rate_hz <= 0:
+        raise ValueError("target_sampling_rate_hz must be positive for WESAD resampling.")
+    duration_seconds = len(label) / WESAD_CHEST_RATE_HZ
+    n = int(np.floor(duration_seconds * target_sampling_rate_hz))
+    if n < 2:
+        raise ValueError(f"WESAD subject {pkl_path} is too short after resampling.")
+    target_ts = np.arange(n, dtype=float) / target_sampling_rate_hz
+    label_resampled = _sample_labels(label, WESAD_CHEST_RATE_HZ, target_ts)
+    ecg = _resample_numeric(ecg, ecg_rate, target_ts)
+    eda = _resample_numeric(eda, eda_rate, target_ts)
+    temp = _resample_numeric(temp, temp_rate, target_ts)
+    resp = _resample_numeric(resp, resp_rate, target_ts) if resp is not None else np.full(n, np.nan)
+    acc = _resample_numeric(acc, acc_rate, target_ts) if acc is not None else np.full(n, np.nan)
 
     label_map_stress = LABEL_MAP_STRESS_INCLUDE_AMUSEMENT if stress_include_amusement else LABEL_MAP_STRESS_DEFAULT
     df = pd.DataFrame(
         {
             schema.worker_id: _subject_id_from_path(pkl_path),
-            schema.timestamp: np.arange(n, dtype=float),
+            schema.timestamp: target_ts,
             schema.time_idx: np.arange(n, dtype=int),
             "ecg": ecg,
             "eda": eda,
             "temp": temp,
             "resp": resp,
             "accel": acc,
-            schema.protocol_label: pd.Series(label).map(PROTOCOL_MAP).fillna("other"),
-            schema.stress_target: pd.Series(label).map(label_map_stress),
-            schema.comfort_target: pd.Series(label).map(LABEL_MAP_COMFORT),
+            schema.protocol_label: pd.Series(label_resampled).map(PROTOCOL_MAP).fillna("other"),
+            schema.stress_target: pd.Series(label_resampled).map(label_map_stress),
+            schema.comfort_target: pd.Series(label_resampled).map(LABEL_MAP_COMFORT),
         }
     )
     df = df[df[schema.comfort_target].notna()].copy()
@@ -184,6 +208,7 @@ def load_wesad_dataset(
     subjects: list[str] | None = None,
     max_rows_per_subject: int | None = None,
     downsample_factor: int | None = None,
+    target_sampling_rate_hz: float = 4.0,
     stress_include_amusement: bool = False,
 ) -> pd.DataFrame:
     """Load WESAD from native pickle folders or CSV exports."""
@@ -198,12 +223,19 @@ def load_wesad_dataset(
     if use_pickles:
         frames = []
         for pkl_path in pickles:
-            subject_df = _load_wesad_subject_pickle(pkl_path, schema, stress_include_amusement=stress_include_amusement)
+            subject_df = _load_wesad_subject_pickle(
+                pkl_path,
+                schema,
+                target_sampling_rate_hz=target_sampling_rate_hz,
+                stress_include_amusement=stress_include_amusement,
+            )
             if downsample_factor and downsample_factor > 1:
-                subject_df = subject_df.iloc[::downsample_factor].copy()
+                raise ValueError(
+                    "dataset.downsample_factor is deprecated for WESAD pickle loading. "
+                    "Use stream.target_sampling_rate_hz for explicit resampling."
+                )
             if max_rows_per_subject and max_rows_per_subject > 0 and len(subject_df) > max_rows_per_subject:
-                idx = np.linspace(0, len(subject_df) - 1, max_rows_per_subject).astype(int)
-                subject_df = subject_df.iloc[idx].copy()
+                subject_df = subject_df.iloc[:max_rows_per_subject].copy()
             frames.append(subject_df)
         if not frames:
             raise FileNotFoundError(f"No valid WESAD subject pickle files found under {path}")
@@ -212,17 +244,12 @@ def load_wesad_dataset(
         df = _load_wesad_csvs(path, schema, stress_include_amusement=stress_include_amusement)
         df = df.sort_values([schema.worker_id, schema.time_idx])
         if downsample_factor and downsample_factor > 1:
-            df = (
-                df.groupby(schema.worker_id, observed=True)
-                .apply(lambda g: g.iloc[::downsample_factor])
-                .reset_index(drop=True)
-            )
+            raise ValueError("dataset.downsample_factor is deprecated. Use stream.target_sampling_rate_hz or pre-resample CSVs.")
         if max_rows_per_subject and max_rows_per_subject > 0:
             def _sample(g: pd.DataFrame) -> pd.DataFrame:
                 if len(g) <= max_rows_per_subject:
                     return g
-                idx = np.linspace(0, len(g) - 1, max_rows_per_subject).astype(int)
-                return g.iloc[idx]
+                return g.iloc[:max_rows_per_subject]
 
             df = df.groupby(schema.worker_id, observed=True).apply(_sample).reset_index(drop=True)
     else:
@@ -248,4 +275,14 @@ def load_wesad_dataset(
             )
         df[schema.worker_id] = df[schema.worker_id].astype(str).map(_normalize_subject_id)
 
-    return df.sort_values([schema.worker_id, schema.time_idx]).reset_index(drop=True)
+    df = df.sort_values([schema.worker_id, schema.timestamp]).reset_index(drop=True)
+    df[schema.time_idx] = df.groupby(schema.worker_id, observed=True).cumcount().astype(int)
+    df.attrs["time_metadata"] = {
+        "representation": "raw_signal",
+        "source_sampling_rate_hz": WESAD_CHEST_RATE_HZ if use_pickles else None,
+        "target_sampling_rate_hz": float(target_sampling_rate_hz) if use_pickles else None,
+        "effective_sampling_rate_hz": float(target_sampling_rate_hz) if use_pickles else None,
+        "resampling": "linear_interpolation_per_signal" if use_pickles else "csv_provided_timestamps",
+        "max_rows_per_subject": max_rows_per_subject,
+    }
+    return df

@@ -56,10 +56,13 @@ targets:
     task_type: regression
 
 task:
-  horizon_steps: 1
-  window_length: 8
-  sampling_rate_hz: 0.0166667
-  window_step: 1
+  context_seconds: 240
+  forecast_horizon_seconds: 60
+  inference_stride_seconds: 60
+
+stream:
+  representation: precomputed_features
+  row_interval_seconds: 60
 
 split:
   mode: time

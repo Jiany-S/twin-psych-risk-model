@@ -12,6 +12,7 @@ from .load_multiphysio import load_multiphysio_dataset
 from .load_wesad import load_wesad_dataset
 from .schema import DataSchema
 from .synthetic import generate_synthetic_dataset
+from .time_semantics import infer_temporal_spec
 
 
 def _load_csv_files(raw_dir: Path) -> list[pd.DataFrame]:
@@ -76,6 +77,7 @@ def load_or_generate(cfg: Mapping[str, object], schema: DataSchema) -> pd.DataFr
         max_rows_per_subject = int(max_rows) if max_rows else None
         downsample = dataset_cfg.get("downsample_factor")
         downsample_factor = int(downsample) if downsample else None
+        temporal = infer_temporal_spec(cfg)
         stress_include_amusement = bool(dataset_cfg.get("stress_include_amusement", True))
         return load_wesad_dataset(
             resolved_path,
@@ -84,6 +86,7 @@ def load_or_generate(cfg: Mapping[str, object], schema: DataSchema) -> pd.DataFr
             subjects=subject_list,
             max_rows_per_subject=max_rows_per_subject,
             downsample_factor=downsample_factor,
+            target_sampling_rate_hz=float(temporal.target_sampling_rate_hz or temporal.effective_sampling_rate_hz),
             stress_include_amusement=stress_include_amusement,
         )
 

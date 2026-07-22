@@ -30,9 +30,14 @@ experiment:
   task_name: stress classification
 
 task:
-  horizon_steps: 5
-  window_length: 60
-  sampling_rate_hz: 4.0
+  context_seconds: 15.0
+  forecast_horizon_seconds: 1.25
+  inference_stride_seconds: 0.25
+
+stream:
+  representation: raw_signal
+  source_sampling_rate_hz: 4.0
+  target_sampling_rate_hz: 4.0
 
 split:
   train_ratio: 0.7

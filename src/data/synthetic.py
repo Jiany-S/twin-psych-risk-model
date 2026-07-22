@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from .schema import DataSchema
+from .time_semantics import infer_temporal_spec
 
 
 def generate_synthetic_dataset(cfg: Mapping[str, object], schema: DataSchema) -> pd.DataFrame:
@@ -16,6 +17,7 @@ def generate_synthetic_dataset(cfg: Mapping[str, object], schema: DataSchema) ->
     num_workers = int(synth_cfg.get("num_workers", 8))
     num_timesteps = int(synth_cfg.get("num_timesteps", 300))
     missing_rate = float(synth_cfg.get("missing_rate", 0.02))
+    temporal = infer_temporal_spec(cfg)
 
     rows = []
     for worker_id in range(num_workers):
@@ -42,7 +44,7 @@ def generate_synthetic_dataset(cfg: Mapping[str, object], schema: DataSchema) ->
 
             rows.append(
                 {
-                    schema.timestamp: float(t),
+                    schema.timestamp: float(t) * temporal.row_interval_seconds,
                     schema.time_idx: t,
                     schema.worker_id: str(worker_id),
                     "ecg": float(ecg),

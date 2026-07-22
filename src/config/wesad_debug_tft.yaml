@@ -10,7 +10,6 @@ dataset:
   path: data/wesad/wesad_subset
   format: auto
   subjects: ["S2"]
-  downsample_factor: 20
   max_rows_per_subject: 5000
 
 reproducibility:
@@ -27,10 +26,14 @@ targets:
     label_col: y_comfort_proxy
 
 task:
-  horizon_steps: 5
-  window_length: 60
-  sampling_rate_hz: 4.0
-  window_step: 5
+  context_seconds: 300
+  forecast_horizon_seconds: 25
+  inference_stride_seconds: 25
+
+stream:
+  representation: raw_signal
+  source_sampling_rate_hz: 700.0
+  target_sampling_rate_hz: 4.0
 
 split:
   mode: time
