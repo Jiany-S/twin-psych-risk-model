@@ -52,7 +52,10 @@ class DataSchema:
             "cognitive_load": target_col("cognitive_load", "y_cognitive_load"),
             "cognitive_load_binary": target_col("cognitive_load_binary", "y_cognitive_load_binary"),
             "comfort": target_col("comfort", "y_comfort_proxy"),
+            "comfort_binary": target_col("comfort_binary", "y_comfort_binary"),
+            "valence_binary": target_col("valence_binary", "y_valence_binary"),
             "arousal": target_col("arousal", "y_arousal"),
+            "arousal_binary": target_col("arousal_binary", "y_arousal_binary"),
         }
         primary_name = str(experiment.get("primary_target", target_cfg("primary").get("name", "stress")))
         primary_col = str(target_cfg("primary").get("label_col", target_map.get(primary_name, "y_stress")))

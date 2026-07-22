@@ -1,0 +1,150 @@
+paths:
+  run_root: experiments/runs
+
+dataset:
+  name: multiphysio
+  report_name: "MultiPhysio-HRC grouped subject CV benchmark"
+  path: data/multiphysio
+  multiphysio:
+    feature_columns:
+      hrv_mean_nn: HRV_MeanNN
+      eda_mean: EDA_mean
+      emg_rmse: EMG_RMSE
+      rrv_mean_bb: RRV_MeanBB
+    repetition_offset: 1
+    min_rows_per_worker: 20
+    row_interval_seconds: 60
+
+stream:
+  representation: precomputed_features
+  row_interval_seconds: 60
+
+reproducibility:
+  seed: 42
+
+cv:
+  mode: group_kfold  # leave_one_subject_out | group_kfold
+  n_splits: 5
+  validation_group_fraction: 0.2
+  max_folds: null
+
+targets:
+  multi_head:
+    enabled: false
+  stress:
+    label_col: y_stress
+    source_col: STAI
+    source_questionnaire: STAI-Y1
+    source_range: [20, 80]
+    task_type: regression
+  stress_binary:
+    label_col: y_stress_binary
+    source_col: STAI
+    source_questionnaire: STAI-Y1
+    source_range: [20, 80]
+    task_type: classification
+    threshold: 40.0
+  cognitive_load:
+    label_col: y_cognitive_load
+    source_col: NASA
+    source_questionnaire: NASA-TLX
+    source_range: [0, 100]
+    task_type: regression
+  cognitive_load_binary:
+    label_col: y_cognitive_load_binary
+    source_col: NASA
+    source_questionnaire: NASA-TLX
+    source_range: [0, 100]
+    task_type: classification
+    threshold: 40.0
+  comfort:
+    label_col: y_comfort_proxy
+    source_col: Valence
+    source_questionnaire: SAM Valence
+    source_range: [1, 5]
+    task_type: regression
+  valence_binary:
+    label_col: y_valence_binary
+    source_col: Valence
+    source_questionnaire: SAM Valence
+    source_range: [1, 5]
+    task_type: classification
+    threshold: 3.0
+  arousal:
+    label_col: y_arousal
+    source_col: Arousal
+    source_questionnaire: SAM Arousal
+    source_range: [1, 5]
+    task_type: regression
+  arousal_binary:
+    label_col: y_arousal_binary
+    source_col: Arousal
+    source_questionnaire: SAM Arousal
+    source_range: [1, 5]
+    task_type: classification
+    threshold: 3.0
+
+benchmark_targets:
+  stress_stai:
+    label_col: y_stress_binary
+    source: STAI-Y1
+    positive_definition: STAI >= 40
+  cognitive_workload_nasa:
+    label_col: y_cognitive_load_binary
+    source: NASA-TLX
+    positive_definition: NASA >= 40
+  valence_sam:
+    label_col: y_valence_binary
+    source: SAM Valence
+    positive_definition: Valence >= 3
+  arousal_sam:
+    label_col: y_arousal_binary
+    source: SAM Arousal
+    positive_definition: Arousal >= 3
+
+features:
+  timestamp: timestamp
+  time_idx: time_idx
+  worker_id: worker_id
+  protocol_label: protocol_label
+  physiology: [hrv_mean_nn, eda_mean, emg_rmse, rrv_mean_bb]
+  engineering_mode: precomputed
+  use_robot_context: false
+  optional:
+    hazard_zone: hazard_zone
+    task_phase: task_phase
+    specialization_col: specialization_index
+    experience_col: experience_level
+
+models:
+  run_dummy: true
+  run_logistic: true
+  run_random_forest: true
+  run_adaboost: true
+  run_xgb: true
+  run_tft: false
+
+logistic_regression:
+  C: 1.0
+  max_iter: 1000
+  solver: lbfgs
+  class_weight: balanced
+
+random_forest:
+  n_estimators: 120
+  max_depth: null
+  min_samples_leaf: 2
+  class_weight: balanced
+  n_jobs: -1
+
+adaboost:
+  n_estimators: 80
+  learning_rate: 0.5
+
+xgboost:
+  max_depth: 3
+  n_estimators: 120
+  learning_rate: 0.05
+  subsample: 0.9
+  colsample_bytree: 0.9
+  eval_metric: logloss
