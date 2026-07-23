@@ -1,0 +1,13 @@
+_base_: streaming_multirate.yaml
+
+replay:
+  mode: synthetic_physical
+  accelerated: true
+  seed: 42
+
+fast_model:
+  enabled: false
+
+slow_model:
+  enabled: false
+

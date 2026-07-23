@@ -1,0 +1,88 @@
+paths:
+  run_root: experiments/runs
+
+replay:
+  mode: combined_simulation  # physiological | synthetic_physical | combined_simulation
+  accelerated: true
+  seed: 42
+
+dataset:
+  name: wesad
+  path: data/wesad/wesad_subset
+  format: auto
+  subjects: ["S8"]
+  max_rows_per_subject: 9000
+  stress_include_amusement: true
+
+stream:
+  representation: raw_signal
+  source_sampling_rate_hz: 700.0
+  target_sampling_rate_hz: 4.0
+
+experiment:
+  primary_target: stress
+
+targets:
+  stress:
+    label_col: y_stress
+    task_type: classification
+  comfort:
+    label_col: y_comfort_proxy
+    task_type: regression
+
+features:
+  timestamp: timestamp
+  time_idx: time_idx
+  worker_id: worker_id
+  protocol_label: protocol_label
+  physiology: [ecg, eda, temp]
+  use_robot_context: false
+
+physical_kernel:
+  enabled: true
+  update_interval_seconds: 0.05
+  minimum_separation_m: 1.5
+  caution_separation_m: 2.5
+  critical_ttc_seconds: 1.0
+  caution_ttc_seconds: 3.0
+  stopping_distance_margin_m: 0.5
+  max_sensor_age_seconds: 0.25
+  invalid_input_policy: degraded
+
+fast_model:
+  enabled: true
+  inference_stride_seconds: 0.25
+
+fast_policy:
+  activation_threshold: 0.70
+  release_threshold: 0.45
+  consecutive_positive_required: 3
+  consecutive_negative_required: 5
+  cooldown_seconds: 3.0
+  max_result_age_seconds: 1.0
+  invalid_probability_policy: degraded
+  controlled_stop_after_seconds: 1.0
+
+slow_model:
+  enabled: true
+  inference_stride_seconds: 1.0
+  forecast_horizons_seconds: [5.0, 30.0]
+
+slow_policy:
+  horizon_5s:
+    activation_threshold: 0.75
+    release_threshold: 0.50
+    consecutive_positive_required: 2
+  horizon_30s:
+    activation_threshold: 0.70
+    release_threshold: 0.45
+    consecutive_positive_required: 3
+  max_result_age_seconds: 3.0
+  invalid_probability_policy: ignore_and_log
+
+state_machine:
+  emergency_latching: true
+  cooldown_seconds: 3.0
+  emergency_reset_hold_seconds: 1.0
+  degraded_policy:
+    action: controlled_stop

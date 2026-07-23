@@ -1,0 +1,10 @@
+_base_: streaming_multirate.yaml
+
+replay:
+  mode: physiological
+  accelerated: true
+  seed: 42
+
+physical_kernel:
+  enabled: false
+
