@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import torch
 import yaml
+from sklearn.base import clone
 from sklearn.dummy import DummyClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
@@ -57,6 +58,22 @@ def _split_by_time(frame: pd.DataFrame, schema: DataSchema, cfg: dict[str, Any])
     train_ratio = float(split_cfg.get("train_ratio", 0.6))
     val_ratio = float(split_cfg.get("val_ratio", 0.2))
     labels = pd.Series(index=frame.index, dtype=object)
+    if mode == "subject_holdout":
+        train_subjects = {str(s) for s in split_cfg.get("train_subjects", [])}
+        val_subjects = {str(s) for s in split_cfg.get("validation_subjects", split_cfg.get("val_subjects", []))}
+        test_subjects = {str(s) for s in split_cfg.get("test_subjects", [])}
+        if not train_subjects or not val_subjects or not test_subjects:
+            raise ValueError("subject_holdout split requires train_subjects, validation_subjects, and test_subjects.")
+        if train_subjects & val_subjects or train_subjects & test_subjects or val_subjects & test_subjects:
+            raise ValueError("Fast subject_holdout train/validation/test subject sets must be disjoint.")
+        workers = frame[schema.worker_id].astype(str)
+        labels.loc[workers.isin(train_subjects)] = "train"
+        labels.loc[workers.isin(val_subjects)] = "validation"
+        labels.loc[workers.isin(test_subjects)] = "test"
+        if labels.isna().any():
+            missing = sorted(workers[labels.isna()].unique())
+            raise ValueError(f"Rows from subjects not assigned to a split: {missing}")
+        return labels
     if mode == "stratified_time":
         for _, group in frame.groupby([schema.worker_id, schema.primary_target], observed=True):
             ordered = group.sort_values(schema.timestamp)
@@ -85,35 +102,55 @@ def _build_windows(
     feature_columns: list[str],
     context_samples: int,
     stride_samples: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    horizon_samples: int,
+    expected_interval_seconds: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, pd.DataFrame]:
     raw_windows: list[np.ndarray] = []
     engineered: list[np.ndarray] = []
     y_rows: list[int] = []
-    split_rows: list[str] = []
-    ts_rows: list[float] = []
+    meta_rows: list[dict[str, Any]] = []
     for _, subject in frame.groupby(schema.worker_id, observed=True):
         subject = subject.sort_values(schema.timestamp)
         values = subject[feature_columns].to_numpy(dtype=float)
         targets = subject[schema.primary_target].to_numpy(dtype=int)
         timestamps = subject[schema.timestamp].to_numpy(dtype=float)
+        protocols = subject[schema.protocol_label].astype(str).to_numpy()
         subject_splits = split_labels.loc[subject.index].to_numpy(dtype=object)
-        for end in range(context_samples - 1, len(subject), stride_samples):
+        for end in range(context_samples - 1, len(subject) - horizon_samples, stride_samples):
             start = end - context_samples + 1
+            target_idx = end + horizon_samples
             window_split = subject_splits[start : end + 1]
             if len(set(window_split)) != 1:
+                continue
+            window_protocols = protocols[start : end + 1]
+            if len(set(window_protocols)) != 1:
+                continue
+            if protocols[target_idx] != protocols[end]:
+                continue
+            diffs = np.diff(timestamps[start : end + 1])
+            if len(diffs) and np.any(diffs > expected_interval_seconds * 1.5):
                 continue
             window = values[start : end + 1]
             raw_windows.append(window.T.astype(np.float32))
             engineered.append(causal_window_features(window, feature_columns))
-            y_rows.append(int(targets[end]))
-            split_rows.append(str(window_split[-1]))
-            ts_rows.append(float(timestamps[end]))
+            y_rows.append(int(targets[target_idx]))
+            meta_rows.append(
+                {
+                    "worker_id": str(subject[schema.worker_id].iloc[0]),
+                    "split": str(window_split[-1]),
+                    "protocol_label": str(protocols[end]),
+                    "window_start_timestamp": float(timestamps[start]),
+                    "window_end_timestamp": float(timestamps[end]),
+                    "prediction_timestamp": float(timestamps[end]),
+                    "target_timestamp": float(timestamps[target_idx]),
+                    "target": int(targets[target_idx]),
+                }
+            )
     return (
         np.asarray(raw_windows, dtype=np.float32),
         np.asarray(engineered, dtype=np.float32),
         np.asarray(y_rows, dtype=int),
-        np.asarray(ts_rows, dtype=float),
-        split_rows,
+        pd.DataFrame(meta_rows),
     )
 
 
@@ -216,6 +253,51 @@ def _latency_summary(estimator: Any, samples: np.ndarray, mode: str) -> dict[str
     }
 
 
+def _positive_class_probs(estimator: Any, x: np.ndarray) -> tuple[np.ndarray, list[int]]:
+    classes = list(getattr(estimator, "classes_", [0, 1]))
+    if 1 not in classes:
+        raise ValueError(f"Estimator classes do not include positive class 1: {classes}")
+    probs = estimator.predict_proba(x)
+    return probs[:, classes.index(1)], [int(c) for c in classes]
+
+
+def _orientation_diagnostics(y_true: np.ndarray, probs: np.ndarray) -> dict[str, Any]:
+    if np.unique(y_true).size < 2:
+        return {"auroc_p": float("nan"), "auroc_one_minus_p": float("nan"), "orientation_warning": "test_single_class"}
+    auroc_p = float(roc_auc_score(y_true, probs))
+    auroc_inv = float(roc_auc_score(y_true, 1.0 - probs))
+    warning = "inverted_probability_scores" if auroc_inv - auroc_p >= 0.2 else ""
+    return {"auroc_p": auroc_p, "auroc_one_minus_p": auroc_inv, "orientation_warning": warning}
+
+
+def _split_quality(frame: pd.DataFrame, meta: pd.DataFrame, split_labels: pd.Series, schema: DataSchema) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    assigned = frame.copy()
+    assigned["split"] = split_labels.to_numpy()
+    for (split, worker), group in assigned.groupby(["split", schema.worker_id], observed=True):
+        windows = meta[(meta["split"] == split) & (meta["worker_id"].astype(str) == str(worker))]
+        counts = group[schema.primary_target].value_counts().to_dict()
+        protocol_counts = group[schema.protocol_label].astype(str).value_counts().to_dict()
+        rows.append(
+            {
+                "split": str(split),
+                "worker_id": str(worker),
+                "row_count": int(len(group)),
+                "window_count": int(len(windows)),
+                "positive_count": int(counts.get(1, 0)),
+                "negative_count": int(counts.get(0, 0)),
+                "prevalence": float(counts.get(1, 0) / len(group)) if len(group) else 0.0,
+                "window_positive_count": int((windows["target"] == 1).sum()) if not windows.empty else 0,
+                "window_negative_count": int((windows["target"] == 0).sum()) if not windows.empty else 0,
+                "window_prevalence": float(windows["target"].mean()) if not windows.empty else 0.0,
+                "protocol_composition": json.dumps(protocol_counts, sort_keys=True),
+                "first_timestamp": float(group[schema.timestamp].min()),
+                "last_timestamp": float(group[schema.timestamp].max()),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def run(config_path: str | Path) -> Path:
     cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
     seed = int(cfg.get("reproducibility", {}).get("seed", 42))
@@ -225,6 +307,8 @@ def run(config_path: str | Path) -> Path:
     target_rate = float(stream.get("target_sampling_rate_hz", 4.0))
     fast_cfg = cfg.get("fast_model", {})
     context_samples = max(1, int(round(float(fast_cfg.get("context_seconds", 3.0)) * target_rate)))
+    horizon_seconds = float(fast_cfg.get("forecast_horizon_seconds", 0.0))
+    horizon_samples = max(0, int(round(horizon_seconds * target_rate)))
     stride_seconds = float(fast_cfg.get("inference_stride_seconds", 0.25))
     stride_samples = max(1, int(round(stride_seconds * target_rate)))
     dataset_cfg = cfg.get("dataset", {})
@@ -241,10 +325,17 @@ def run(config_path: str | Path) -> Path:
     frame[schema.primary_target] = frame[schema.primary_target].astype(int)
     split_labels = _split_by_time(frame, schema, cfg)
     feature_columns = list(schema.physiology)
-    raw_x, feat_x, y, timestamps, window_splits = _build_windows(
-        frame, split_labels, schema, feature_columns, context_samples, stride_samples
+    raw_x, feat_x, y, meta = _build_windows(
+        frame,
+        split_labels,
+        schema,
+        feature_columns,
+        context_samples,
+        stride_samples,
+        horizon_samples,
+        expected_interval_seconds=1.0 / target_rate,
     )
-    split_arr = np.asarray(window_splits)
+    split_arr = meta["split"].to_numpy(dtype=str)
     train_mask = split_arr == "train"
     val_mask = split_arr == "validation"
     test_mask = split_arr == "test"
@@ -252,19 +343,24 @@ def run(config_path: str | Path) -> Path:
         raise ValueError("Fast WESAD split produced an empty train, validation, or test window set.")
     if np.unique(y[train_mask]).size < 2 or np.unique(y[val_mask]).size < 2:
         raise ValueError("Fast WESAD train and validation splits must each contain both classes.")
+    if not np.allclose(meta["target_timestamp"] - meta["prediction_timestamp"], horizon_seconds, atol=(1.0 / target_rate) + 1e-6):
+        raise ValueError("Fast prediction target timestamps are not aligned to the configured horizon.")
 
     run_dir = _make_run_dir(cfg.get("paths", {}).get("run_root", "experiments/runs"))
     (run_dir / "config_resolved.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
     (run_dir / "feature_names.json").write_text(json.dumps(causal_feature_names(feature_columns), indent=2), encoding="utf-8")
+    split_quality = _split_quality(frame, meta, split_labels, schema)
+    split_quality.to_csv(run_dir / "split_quality.csv", index=False)
     metrics_rows: list[dict[str, Any]] = []
+    diagnostic_frames: list[pd.DataFrame] = []
     models_to_run = fast_cfg.get("architectures", ["dummy", "logistic", "tcn"])
 
     for name in models_to_run:
         if name == "dummy":
             estimator = DummyClassifier(strategy="prior", random_state=seed)
             estimator.fit(feat_x[train_mask], y[train_mask])
-            val_probs = estimator.predict_proba(feat_x[val_mask])[:, 1]
-            test_probs = estimator.predict_proba(feat_x[test_mask])[:, 1]
+            val_probs, class_order = _positive_class_probs(estimator, feat_x[val_mask])
+            test_probs, class_order = _positive_class_probs(estimator, feat_x[test_mask])
             joblib.dump(estimator, run_dir / "models" / "dummy.joblib")
             model_size = int((run_dir / "models" / "dummy.joblib").stat().st_size)
             params = 0
@@ -278,8 +374,8 @@ def run(config_path: str | Path) -> Path:
                 ]
             )
             estimator.fit(feat_x[train_mask], y[train_mask])
-            val_probs = estimator.predict_proba(feat_x[val_mask])[:, 1]
-            test_probs = estimator.predict_proba(feat_x[test_mask])[:, 1]
+            val_probs, class_order = _positive_class_probs(estimator, feat_x[val_mask])
+            test_probs, class_order = _positive_class_probs(estimator, feat_x[test_mask])
             joblib.dump(estimator, run_dir / "models" / "logistic.joblib")
             model_size = int((run_dir / "models" / "logistic.joblib").stat().st_size)
             params = int(len(causal_feature_names(feature_columns)) + 1)
@@ -290,6 +386,7 @@ def run(config_path: str | Path) -> Path:
             with torch.no_grad():
                 val_probs = torch.sigmoid(model(torch.from_numpy(raw_x[val_mask]))).numpy()
                 test_probs = torch.sigmoid(model(torch.from_numpy(raw_x[test_mask]))).numpy()
+            class_order = [0, 1]
             torch.save(model.state_dict(), run_dir / "models" / "fast_tcn.pt")
             model_size = model_size_bytes(model)
             params = count_parameters(model)
@@ -308,16 +405,19 @@ def run(config_path: str | Path) -> Path:
         threshold = float(threshold_diag["threshold"]) if not threshold_diag.get("fallback_used") else 0.5
         metrics = _binary_metrics(y[test_mask], test_probs, threshold, stride_seconds)
         fixed = _binary_metrics(y[test_mask], test_probs, 0.5, stride_seconds)
+        orientation = _orientation_diagnostics(y[test_mask], test_probs)
         metrics.update({f"fixed_0_5_{k}": v for k, v in fixed.items() if k != "confusion_matrix"})
         metrics.update(latency)
         metrics.update(
             {
                 "model": name,
+                "model_class_order": class_order,
+                "orientation_diagnostics": orientation,
                 "threshold_diagnostics": threshold_diag,
                 "model_size_bytes": int(model_size),
                 "parameter_count": int(params),
                 "context_seconds": float(fast_cfg.get("context_seconds", 3.0)),
-                "forecast_horizon_seconds": float(fast_cfg.get("forecast_horizon_seconds", 0.0)),
+                "forecast_horizon_seconds": horizon_seconds,
                 "inference_stride_seconds": stride_seconds,
                 "effective_sampling_rate_hz": target_rate,
                 "detection_delay_seconds": None,
@@ -325,17 +425,18 @@ def run(config_path: str | Path) -> Path:
             }
         )
         metrics_rows.append(metrics)
-        pd.DataFrame(
-            {
-                "timestamp": timestamps[test_mask],
-                "y_true": y[test_mask],
-                "probability": test_probs,
-                "prediction": test_probs >= threshold,
-                "prediction_fixed_0_5": test_probs >= 0.5,
-            }
-        ).to_csv(run_dir / f"predictions_{name}.csv", index=False)
+        pred_df = meta.loc[test_mask].copy().reset_index(drop=True)
+        pred_df["model"] = name
+        pred_df["predicted_probability"] = test_probs
+        pred_df["prediction"] = test_probs >= threshold
+        pred_df["prediction_fixed_0_5"] = test_probs >= 0.5
+        pred_df["y_true"] = y[test_mask]
+        pred_df.to_csv(run_dir / f"predictions_{name}.csv", index=False)
+        diagnostic_frames.append(pred_df)
 
     metrics_df = pd.DataFrame(metrics_rows)
+    diagnostic_predictions = pd.concat(diagnostic_frames, ignore_index=True)
+    diagnostic_predictions.to_csv(run_dir / "diagnostic_predictions.csv", index=False)
     metrics_df.to_csv(run_dir / "fast_metrics.csv", index=False)
     (run_dir / "fast_metrics.json").write_text(json.dumps(metrics_rows, indent=2, default=_json_default), encoding="utf-8")
     cols = ["model", "auroc", "auprc", "f1", "balanced_accuracy", "brier", "ece", "latency_p95_ms", "model_size_bytes"]
@@ -344,11 +445,38 @@ def run(config_path: str | Path) -> Path:
         "",
         "This run uses raw WESAD physiology resampled to the configured effective rate.",
         "It predicts the WESAD protocol stress state at the end of a causal observation window; it is not a MultiPhysio second-level safety detector.",
+        "Class 0 is baseline/non-stress, class 1 is protocol stress. Amusement follows `dataset.stress_include_amusement` in the resolved config.",
+        "",
+        "Orientation diagnostics save AUROC with `p` and with `1 - p`; inverted-looking scores are reported but not automatically flipped.",
         "",
         metrics_df[cols].to_markdown(index=False),
         "",
     ]
     (run_dir / "fast_results.md").write_text("\n".join(summary), encoding="utf-8")
+    doc_lines = [
+        "# Fast WESAD Diagnostics",
+        "",
+        f"Run directory: `{run_dir}`",
+        "",
+        "Baseline maps to class 0 and stress maps to class 1 in `src/data/load_wesad.py`.",
+        f"Amusement handling: `stress_include_amusement={bool(dataset_cfg.get('stress_include_amusement', True))}`.",
+        "Scikit-learn probabilities are selected by locating class `1` in `classes_`; TCN probabilities are `sigmoid(logit)` for class 1.",
+        "",
+        "## Split Quality",
+        "",
+        split_quality.to_markdown(index=False),
+        "",
+        "## Orientation",
+        "",
+        metrics_df[["model", "auroc", "auprc", "orientation_diagnostics", "model_class_order"]].to_markdown(index=False),
+        "",
+        "## Temporal Alignment",
+        "",
+        "`diagnostic_predictions.csv` includes worker ID, protocol label, window start/end timestamps, prediction timestamp, target timestamp, target value, and predicted probability. Windows crossing protocol boundaries or timestamp gaps are excluded.",
+        "",
+    ]
+    (run_dir / "fast_wesad_diagnostics.md").write_text("\n".join(doc_lines), encoding="utf-8")
+    Path("docs/fast_wesad_diagnostics.md").write_text("\n".join(doc_lines), encoding="utf-8")
     return run_dir
 
 

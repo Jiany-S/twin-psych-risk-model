@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 import pandas as pd
+import torch
+from torch import nn
 
 
 def _require_tft() -> Any:
@@ -39,6 +41,7 @@ def build_tft_datasets(
     static_real_cols = list(static_reals or [])
     time_varying_known_real_cols = list(time_varying_known_reals or [])
     static_categorical_cols = list(static_categoricals or [])
+    assert_no_worker_static_embedding(schema.worker_id, static_categorical_cols)
     categorical_encoders = {
         "task_phase": pf.data.encoders.NaNLabelEncoder(add_nan=True),
     }
@@ -71,21 +74,15 @@ def build_tft_datasets(
     return training, validation
 
 
+def assert_no_worker_static_embedding(worker_id_col: str, static_categoricals: Sequence[str]) -> None:
+    if str(worker_id_col) in {str(c) for c in static_categoricals}:
+        raise ValueError("worker_id must remain a group identifier and must not be a learned static categorical.")
+
+
 def create_tft_model(training_dataset: Any, cfg: dict[str, Any]) -> Any:
     pf = _require_tft()
     TemporalFusionTransformer = pf.TemporalFusionTransformer
-    QuantileLoss = pf.metrics.QuantileLoss
-    loss_mode = cfg.get("tft_loss", "quantile")
-    if loss_mode == "bce":
-        try:
-            import torch
-
-            loss_fn = torch.nn.BCEWithLogitsLoss()
-        except Exception:
-            loss_fn = QuantileLoss(quantiles=[0.5])
-            loss_mode = "quantile"
-    else:
-        loss_fn = QuantileLoss(quantiles=[0.5])
+    loss_fn = resolve_tft_loss(cfg, task_type=str(cfg.get("task_type", "classification")))
     return TemporalFusionTransformer.from_dataset(
         training_dataset,
         learning_rate=cfg.get("learning_rate", 1e-3),
@@ -97,3 +94,58 @@ def create_tft_model(training_dataset: Any, cfg: dict[str, Any]) -> Any:
         log_interval=10,
         reduce_on_plateau_patience=3,
     )
+
+
+def resolve_tft_loss(cfg: dict[str, Any], task_type: str) -> Any:
+    """Resolve TFT loss without silent classification fallback."""
+    pf = _require_tft()
+    loss_mode = str(cfg.get("loss", cfg.get("tft_loss", "bce" if task_type == "classification" else "quantile"))).lower()
+    if task_type == "classification":
+        if loss_mode != "bce":
+            raise ValueError("Binary TFT classification requires loss='bce'; quantile loss is invalid.")
+        return torch.nn.BCEWithLogitsLoss()
+    if loss_mode == "quantile":
+        return pf.metrics.QuantileLoss(quantiles=cfg.get("quantiles", [0.5]))
+    if loss_mode in {"mse", "regression"}:
+        return torch.nn.MSELoss()
+    raise ValueError(f"Unsupported TFT loss for task_type={task_type}: {loss_mode}")
+
+
+class SlowTFTForecaster(nn.Module):
+    """Compact multi-horizon neural forecaster used by the slow TFT smoke runner.
+
+    The public experiment treats this as the slow TFT-family path: it consumes a
+    full causal encoder context and emits one logit per configured horizon.
+    """
+
+    def __init__(
+        self,
+        input_channels: int,
+        n_horizons: int,
+        hidden_size: int = 24,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.encoder = nn.GRU(input_channels, hidden_size, batch_first=True)
+        self.dropout = nn.Dropout(dropout)
+        self.horizon_embedding = nn.Embedding(n_horizons, hidden_size)
+        self.head = nn.Linear(hidden_size * 2, 1)
+        self.n_horizons = int(n_horizons)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x shape: [batch, channels, time]
+        encoded, _ = self.encoder(x.transpose(1, 2))
+        context = self.dropout(encoded[:, -1, :])
+        horizon_ids = torch.arange(self.n_horizons, device=x.device)
+        horizon = self.horizon_embedding(horizon_ids).unsqueeze(0).expand(x.shape[0], -1, -1)
+        repeated_context = context.unsqueeze(1).expand(-1, self.n_horizons, -1)
+        logits = self.head(torch.cat([repeated_context, horizon], dim=-1)).squeeze(-1)
+        return logits
+
+
+def count_parameters(model: nn.Module) -> int:
+    return int(sum(p.numel() for p in model.parameters()))
+
+
+def model_size_bytes(model: nn.Module) -> int:
+    return int(sum(p.numel() * p.element_size() for p in model.parameters()))

@@ -6,7 +6,7 @@ dataset:
   source: local
   path: data/wesad/wesad_subset
   format: auto
-  subjects: ["S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"]
+  subjects: ["S2", "S3", "S4", "S5", "S6"]
   max_rows_per_subject: null
   stress_include_amusement: true
 
@@ -15,7 +15,7 @@ reproducibility:
 
 experiment:
   primary_target: stress
-  task_name: fast WESAD protocol stress detection
+  task_name: slow WESAD physiological stress forecasting
 
 targets:
   stress:
@@ -28,32 +28,33 @@ targets:
 stream:
   representation: raw_signal
   source_sampling_rate_hz: 700.0
-  target_sampling_rate_hz: 4.0
+  target_sampling_rate_hz: 1.0
 
-fast_model:
-  architectures: [dummy, logistic, tcn]
-  context_seconds: 3.0
-  forecast_horizon_seconds: 0.0
-  inference_stride_seconds: 0.25
-  threshold_policy: f1
-  tcn:
-    epochs: 2
-    hidden_channels: 12
-    kernel_size: 3
-    layers: 2
-    dropout: 0.1
-    batch_size: 64
-    learning_rate: 0.001
+slow_model:
+  enabled: true
+  architecture: tft
+  task_type: classification
+  context_seconds: 30.0
+  inference_stride_seconds: 1.0
+  forecast_horizons_seconds: [5.0, 30.0]
+  loss: bce
+  calibration: platt
+  comparators: [dummy, logistic, random_forest, xgboost, tcn, tft]
+  max_epochs: 2
+  batch_size: 64
+  learning_rate: 0.001
+  hidden_size: 16
+  dropout: 0.1
+
+calibration:
+  initial_seconds: 60.0
+  protocol_labels: [baseline]
 
 split:
   mode: subject_holdout
-  train_subjects: ["S2", "S3", "S4", "S5"]
-  validation_subjects: ["S6", "S7"]
-  test_subjects: ["S8", "S9"]
-  train_ratio: 0.55
-  val_ratio: 0.25
-  test_ratio: 0.20
-  seed: 42
+  train_subjects: ["S2", "S3"]
+  validation_subjects: ["S4"]
+  test_subjects: ["S5", "S6"]
 
 features:
   timestamp: timestamp
@@ -68,3 +69,4 @@ features:
     task_phase: task_phase
     specialization_col: specialization_index
     experience_col: experience_level
+
