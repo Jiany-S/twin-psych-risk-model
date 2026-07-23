@@ -23,10 +23,11 @@ from sklearn.metrics import (
     average_precision_score,
     balanced_accuracy_score,
     brier_score_loss,
+    confusion_matrix,
     f1_score,
     roc_auc_score,
 )
-from sklearn.model_selection import GroupKFold, LeaveOneGroupOut, GroupShuffleSplit
+from sklearn.model_selection import GroupKFold, LeaveOneGroupOut
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -42,7 +43,20 @@ from src.training.metrics import expected_calibration_error, select_threshold_fr
 from src.utils.io import load_merged_yaml, load_yaml
 
 
-METRIC_KEYS = ["auroc", "auprc", "macro_f1", "balanced_accuracy", "brier", "ece"]
+METRIC_KEYS = [
+    "auroc",
+    "auprc",
+    "macro_f1",
+    "balanced_accuracy",
+    "brier",
+    "ece",
+    "fixed_auroc",
+    "fixed_auprc",
+    "fixed_macro_f1",
+    "fixed_balanced_accuracy",
+    "fixed_brier",
+    "fixed_ece",
+]
 
 
 def _json_default(obj: Any) -> Any:
@@ -85,28 +99,51 @@ def _feature_matrix(frame: pd.DataFrame, schema: DataSchema) -> tuple[np.ndarray
     return frame[feature_names].to_numpy(dtype=float), feature_names
 
 
-def _split_train_validation(
-    train_indices: np.ndarray,
+def _select_validation_indices(
+    train_val_indices: np.ndarray,
     groups: np.ndarray,
-    seed: int,
+    y: np.ndarray,
     validation_group_fraction: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    train_groups = np.unique(groups[train_indices])
-    if len(train_groups) < 2:
-        return train_indices, train_indices
-    splitter = GroupShuffleSplit(n_splits=1, test_size=validation_group_fraction, random_state=seed)
-    local = np.arange(len(train_indices))
-    local_train, local_val = next(splitter.split(local, groups=groups[train_indices]))
-    return train_indices[local_train], train_indices[local_val]
+    candidate_groups = sorted(np.unique(groups[train_val_indices]).astype(str))
+    if len(candidate_groups) < 2:
+        return train_val_indices, np.array([], dtype=int)
+    n_val_groups = max(1, int(round(len(candidate_groups) * validation_group_fraction)))
+
+    group_stats = []
+    for group in candidate_groups:
+        idx = train_val_indices[groups[train_val_indices] == group]
+        vals = y[idx]
+        group_stats.append((group, int(np.sum(vals == 0)), int(np.sum(vals == 1)), len(idx)))
+    # Deterministic preference for validation groups that contain both classes, then more balanced groups.
+    ordered = sorted(
+        group_stats,
+        key=lambda item: (
+            0 if item[1] > 0 and item[2] > 0 else 1,
+            abs(item[1] - item[2]) / max(1, item[3]),
+            item[0],
+        ),
+    )
+    selected = [g for g, _, _, _ in ordered[:n_val_groups]]
+    val_idx = train_val_indices[np.isin(groups[train_val_indices].astype(str), selected)]
+    train_idx = train_val_indices[~np.isin(groups[train_val_indices].astype(str), selected)]
+    return train_idx, val_idx
 
 
-def _thresholded_metrics(y_true: np.ndarray, probs: np.ndarray, threshold: float) -> dict[str, Any]:
+def _has_two_classes(y: np.ndarray) -> bool:
+    return np.unique(y).size == 2
+
+
+def _thresholded_metrics(y_true: np.ndarray, probs: np.ndarray, threshold: float, prefix: str = "") -> dict[str, Any]:
     probs = np.clip(probs, 1e-6, 1 - 1e-6)
     pred = probs >= threshold
     unique = np.unique(y_true)
     auroc = float("nan") if unique.size < 2 else float(roc_auc_score(y_true, probs))
     auprc = float("nan") if unique.size < 2 else float(average_precision_score(y_true, probs))
-    return {
+    tn, fp, fn, tp = confusion_matrix(y_true, pred, labels=[0, 1]).ravel()
+    sensitivity = float(tp / max(1, tp + fn))
+    specificity = float(tn / max(1, tn + fp))
+    metrics = {
         "n": int(len(y_true)),
         "n_pos": int(np.sum(y_true == 1)),
         "n_neg": int(np.sum(y_true == 0)),
@@ -116,10 +153,26 @@ def _thresholded_metrics(y_true: np.ndarray, probs: np.ndarray, threshold: float
         "auroc": auroc,
         "auprc": auprc,
         "macro_f1": float(f1_score(y_true, pred, average="macro", zero_division=0)),
-        "balanced_accuracy": float(balanced_accuracy_score(y_true, pred)),
+        "balanced_accuracy": float((sensitivity + specificity) / 2.0),
         "brier": float(brier_score_loss(y_true, probs)),
         "ece": float(expected_calibration_error(probs, y_true, bins=15)),
         "threshold": float(threshold),
+        "has_both_classes": bool(unique.size == 2),
+    }
+    if prefix:
+        return {f"{prefix}_{k}": v for k, v in metrics.items() if k not in {"n", "n_pos", "n_neg", "prevalence", "dummy_auprc_baseline", "has_both_classes"}}
+    return metrics
+
+
+def _threshold_guardrails(cfg: dict[str, Any], y_val: np.ndarray) -> dict[str, Any]:
+    threshold_cfg = cfg.get("thresholding", {})
+    prevalence = float(np.mean(y_val)) if len(y_val) else 0.0
+    tolerance = float(threshold_cfg.get("prevalence_rate_tolerance", 0.25))
+    return {
+        "policy": str(threshold_cfg.get("policy", "f1")).lower(),
+        "min_pred_rate": max(0.02, prevalence - tolerance),
+        "max_pred_rate": min(0.98, prevalence + tolerance),
+        "allow_pathological": bool(threshold_cfg.get("allow_pathological", False)),
     }
 
 
@@ -246,7 +299,92 @@ def _aggregate(per_fold: pd.DataFrame) -> pd.DataFrame:
             row[f"{metric}_ci95_high"] = (
                 float(np.mean(values) + 1.96 * np.std(values, ddof=1) / np.sqrt(values.size)) if values.size > 1 else row[f"{metric}_mean"]
             )
+        for metric in ["auroc", "auprc"]:
+            valid = pd.to_numeric(block[metric], errors="coerce").notna()
+            row[f"{metric}_valid_fold_proportion"] = float(valid.mean()) if len(valid) else 0.0
         rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _target_quality(df: pd.DataFrame, groups: np.ndarray, targets: dict[str, dict[str, str]]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    target_rows = []
+    subject_rows = []
+    for target_name, info in targets.items():
+        y = pd.to_numeric(df[str(info["label_col"])], errors="coerce").to_numpy(dtype=float).astype(int)
+        prevalences = []
+        both = 0
+        for subject in sorted(np.unique(groups)):
+            mask = groups == subject
+            prev = float(np.mean(y[mask])) if np.any(mask) else 0.0
+            has_both = bool(np.unique(y[mask]).size == 2)
+            both += int(has_both)
+            prevalences.append(prev)
+            subject_rows.append(
+                {
+                    "target": target_name,
+                    "subject": subject,
+                    "n": int(np.sum(mask)),
+                    "n_pos": int(np.sum(y[mask] == 1)),
+                    "prevalence": prev,
+                    "has_both_classes": has_both,
+                }
+            )
+        overall = float(np.mean(y)) if len(y) else 0.0
+        target_rows.append(
+            {
+                "target": target_name,
+                "label_col": info["label_col"],
+                "source": info.get("source"),
+                "positive_definition": info.get("positive_definition"),
+                "overall_prevalence": overall,
+                "extreme_prevalence": bool(overall < 0.10 or overall > 0.90),
+                "subjects_total": int(len(np.unique(groups))),
+                "subjects_with_both_classes": int(both),
+                "subject_prevalence_mean": float(np.mean(prevalences)) if prevalences else 0.0,
+                "subject_prevalence_std": float(np.std(prevalences, ddof=1)) if len(prevalences) > 1 else 0.0,
+            }
+        )
+    return pd.DataFrame(target_rows), pd.DataFrame(subject_rows)
+
+
+def _threshold_sensitivity(df: pd.DataFrame, cfg: dict[str, Any]) -> pd.DataFrame:
+    thresholds = {
+        "stress_stai": [35.0, 40.0, 45.0],
+        "cognitive_workload_nasa": [30.0, 40.0, 50.0],
+        "valence_sam": [2.0, 3.0, 4.0],
+        "arousal_sam": [2.0, 3.0, 4.0],
+    }
+    continuous_target_names = {
+        "stress_stai": "stress",
+        "cognitive_workload_nasa": "cognitive_load",
+        "valence_sam": "comfort",
+        "arousal_sam": "arousal",
+    }
+    source_cols = {"stress_stai": "STAI", "cognitive_workload_nasa": "NASA", "valence_sam": "Valence", "arousal_sam": "Arousal"}
+    rows = []
+    for target, vals in thresholds.items():
+        source = source_cols[target]
+        target_cfg = cfg.get("targets", {}).get(continuous_target_names[target], {})
+        label_col = str(target_cfg.get("label_col", ""))
+        source_range = target_cfg.get("source_range")
+        if label_col not in df.columns or not isinstance(source_range, list) or len(source_range) != 2:
+            continue
+        lo, hi = float(source_range[0]), float(source_range[1])
+        normalized = pd.to_numeric(df[label_col], errors="coerce")
+        for threshold in vals:
+            normalized_threshold = (float(threshold) - lo) / (hi - lo)
+            y = (normalized >= normalized_threshold).astype(int)
+            rows.append(
+                {
+                    "target": target,
+                    "source_col": source,
+                    "threshold": threshold,
+                    "normalized_threshold": normalized_threshold,
+                    "prevalence": float(np.mean(y)),
+                    "n_pos": int(np.sum(y == 1)),
+                    "n_neg": int(np.sum(y == 0)),
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -263,12 +401,20 @@ def _write_markdown(run_dir: Path, aggregate: pd.DataFrame, failures: list[dict[
         "ece_mean",
         "prevalence_mean",
     ]
+    cv_cfg = cfg.get("cv", {})
+    mode = cv_cfg.get("mode", "leave_one_subject_out")
+    max_folds = cv_cfg.get("max_folds")
+    cap_note = (
+        f" This run is capped at `{max_folds}` held-out folds for smoke validation; set `cv.max_folds: null` for full LOSO."
+        if max_folds is not None
+        else " This run covers the full configured grouped CV schedule."
+    )
     lines = [
         "# MultiPhysio Benchmark",
         "",
         f"Run directory: `{run_dir}`",
         "",
-        "This benchmark uses grouped subject cross-validation over `bio_features_60s.csv`. One row is a 60-second precomputed physiological feature interval, suitable for slow workload or affect estimation, not immediate safety intervention.",
+        f"This benchmark uses `{mode}` grouped by subject over `bio_features_60s.csv`.{cap_note} One row is a 60-second precomputed physiological feature interval, suitable for slow workload or affect estimation, not immediate safety intervention.",
         "",
         "Only physiological features are used: `hrv_mean_nn`, `eda_mean`, `emg_rmse`, and `rrv_mean_bb`. No fabricated role, specialization, experience, or subject-ID metadata is used as a feature.",
         "",
@@ -278,9 +424,13 @@ def _write_markdown(run_dir: Path, aggregate: pd.DataFrame, failures: list[dict[
         "",
         "## Aggregate Metrics",
         "",
-        "The table below shows fold means. `aggregate_results.csv` and `aggregate_results.json` include mean, standard deviation, median, and 95% confidence interval columns for every metric. `per_subject_metrics.csv` reports metrics for each held-out subject within each grouped fold.",
+        "The table below shows fold means for validation-selected thresholds. `aggregate_results.csv` and `aggregate_results.json` include mean, standard deviation, median, and 95% confidence interval columns for fixed-0.5 and validation-selected metrics. `per_subject_metrics.csv` reports metrics for each held-out subject within each grouped fold.",
         "",
         _markdown_table(aggregate, view_cols),
+        "",
+        "## Target Quality",
+        "",
+        "`target_quality.csv`, `per_subject_prevalence.csv`, and `threshold_sensitivity.csv` report prevalence, per-subject class support, valid AUROC/AUPRC fold proportions, and threshold sensitivity. Extreme-prevalence targets are flagged and should not be described as strong by AUPRC without comparing to prevalence.",
         "",
         "## Failure Summary",
         "",
@@ -308,6 +458,8 @@ def run(config_path: str) -> Path:
     X, feature_names = _feature_matrix(df, schema)
     groups = df[schema.worker_id].astype(str).to_numpy()
     targets = _targets(cfg)
+    target_quality, per_subject_prevalence = _target_quality(df, groups, targets)
+    threshold_sensitivity = _threshold_sensitivity(df, cfg)
 
     run_dir = _make_run_dir(cfg.get("paths", {}).get("run_root", "experiments/runs"))
     (run_dir / "config_resolved.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
@@ -332,19 +484,40 @@ def run(config_path: str) -> Path:
     val_fraction = float(cv_cfg.get("validation_group_fraction", 0.2))
 
     for fold_idx, (train_val_idx, test_idx) in enumerate(splits):
-        train_idx, val_idx = _split_train_validation(train_val_idx, groups, seed + fold_idx, val_fraction)
-        manifest = pd.DataFrame(
-            {
-                "row_index": np.concatenate([train_idx, val_idx, test_idx]),
-                "worker_id": groups[np.concatenate([train_idx, val_idx, test_idx])],
-                "split": ["train"] * len(train_idx) + ["validation"] * len(val_idx) + ["test"] * len(test_idx),
-            }
-        )
-        manifest.to_csv(run_dir / "fold_manifests" / f"fold_{fold_idx:03d}.csv", index=False)
-
         for target_name, target_info in targets.items():
             label_col = str(target_info["label_col"])
             y = pd.to_numeric(df[label_col], errors="coerce").to_numpy(dtype=float).astype(int)
+            train_idx, val_idx = _select_validation_indices(train_val_idx, groups, y, val_fraction)
+            train_subjects = sorted(np.unique(groups[train_idx]).astype(str))
+            val_subjects = sorted(np.unique(groups[val_idx]).astype(str))
+            test_subjects = sorted(np.unique(groups[test_idx]).astype(str))
+            if set(train_subjects) & set(val_subjects) or set(train_subjects) & set(test_subjects) or set(val_subjects) & set(test_subjects):
+                failures.append({"fold": fold_idx, "target": target_name, "model": "split", "error": "subject_sets_not_disjoint"})
+                continue
+            manifest = pd.DataFrame(
+                {
+                    "target": target_name,
+                    "row_index": np.concatenate([train_idx, val_idx, test_idx]),
+                    "worker_id": groups[np.concatenate([train_idx, val_idx, test_idx])],
+                    "split": ["train"] * len(train_idx) + ["validation"] * len(val_idx) + ["test"] * len(test_idx),
+                }
+            )
+            manifest.to_csv(run_dir / "fold_manifests" / f"fold_{fold_idx:03d}_{target_name}.csv", index=False)
+            if not _has_two_classes(y[train_idx]):
+                failures.append({"fold": fold_idx, "target": target_name, "model": "all", "error": "training_has_single_class"})
+                continue
+            if len(val_idx) == 0 or not _has_two_classes(y[val_idx]):
+                failures.append(
+                    {
+                        "fold": fold_idx,
+                        "target": target_name,
+                        "model": "all",
+                        "error": "validation_has_single_class",
+                        "validation_subjects": val_subjects,
+                    }
+                )
+                continue
+            test_has_both = _has_two_classes(y[test_idx])
             for model_name, factory in model_specs.items():
                 if factory is None:
                     failures.append({"fold": fold_idx, "target": target_name, "model": model_name, "error": "xgboost_unavailable"})
@@ -353,17 +526,23 @@ def run(config_path: str) -> Path:
                     model = factory()
                     model.fit(X[train_idx], y[train_idx])
                     val_probs = _positive_proba(model, X[val_idx])
+                    guardrails = _threshold_guardrails(cfg, y[val_idx])
                     threshold_diag = select_threshold_from_validation(
                         y[val_idx],
                         val_probs,
-                        policy="f1",
-                        min_pred_rate=0.0,
-                        max_pred_rate=1.0,
-                        allow_pathological=True,
+                        **guardrails,
                     )
                     threshold = float(threshold_diag["threshold"])
+                    threshold_valid = (
+                        not bool(threshold_diag.get("fallback_used", False))
+                        and 0.05 <= threshold <= 0.95
+                    )
+                    if not threshold_valid:
+                        threshold = 0.5
                     test_probs = _positive_proba(model, X[test_idx])
                     metrics = _thresholded_metrics(y[test_idx], test_probs, threshold)
+                    fixed_metrics = _thresholded_metrics(y[test_idx], test_probs, 0.5, prefix="fixed")
+                    metrics.update(fixed_metrics)
                     metrics.update(
                         {
                             "fold": fold_idx,
@@ -372,7 +551,12 @@ def run(config_path: str) -> Path:
                             "source": target_info.get("source"),
                             "positive_definition": target_info.get("positive_definition"),
                             "test_subjects": ",".join(sorted(np.unique(groups[test_idx]))),
+                            "train_subjects": ",".join(train_subjects),
+                            "validation_subjects": ",".join(val_subjects),
                             "threshold_source": "validation_only",
+                            "threshold_valid": threshold_valid,
+                            "threshold_diagnostics": json.dumps(threshold_diag, default=_json_default),
+                            "test_has_both_classes": test_has_both,
                         }
                     )
                     per_fold_rows.append(metrics)
@@ -383,6 +567,7 @@ def run(config_path: str) -> Path:
                             "y_true": y[test_idx],
                             "probability": test_probs,
                             "prediction": (test_probs >= threshold).astype(int),
+                            "prediction_fixed_0_5": (test_probs >= 0.5).astype(int),
                         }
                     ).to_csv(pred_path, index=False)
                     joblib.dump(model, run_dir / "models" / f"fold_{fold_idx:03d}_{target_name}_{model_name}.pkl")
@@ -390,6 +575,7 @@ def run(config_path: str) -> Path:
                     for subject in sorted(np.unique(groups[test_idx])):
                         mask = groups[test_idx] == subject
                         subject_metrics = _thresholded_metrics(y[test_idx][mask], test_probs[mask], threshold)
+                        subject_metrics.update(_thresholded_metrics(y[test_idx][mask], test_probs[mask], 0.5, prefix="fixed"))
                         subject_metrics.update({"fold": fold_idx, "target": target_name, "model": model_name, "subject": subject})
                         per_subject_rows.append(subject_metrics)
                 except Exception as exc:
@@ -401,6 +587,9 @@ def run(config_path: str) -> Path:
     per_fold.to_csv(run_dir / "per_fold_metrics.csv", index=False)
     per_subject.to_csv(run_dir / "per_subject_metrics.csv", index=False)
     aggregate.to_csv(run_dir / "aggregate_results.csv", index=False)
+    target_quality.to_csv(run_dir / "target_quality.csv", index=False)
+    per_subject_prevalence.to_csv(run_dir / "per_subject_prevalence.csv", index=False)
+    threshold_sensitivity.to_csv(run_dir / "threshold_sensitivity.csv", index=False)
     (run_dir / "per_fold_metrics.json").write_text(json.dumps(per_fold_rows, indent=2, default=_json_default), encoding="utf-8")
     (run_dir / "aggregate_results.json").write_text(
         json.dumps(aggregate.to_dict(orient="records"), indent=2, default=_json_default), encoding="utf-8"

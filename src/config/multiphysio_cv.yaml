@@ -23,10 +23,15 @@ reproducibility:
   seed: 42
 
 cv:
-  mode: group_kfold  # leave_one_subject_out | group_kfold
+  mode: leave_one_subject_out  # leave_one_subject_out | group_kfold
   n_splits: 5
   validation_group_fraction: 0.2
-  max_folds: null
+  max_folds: 5  # partial LOSO smoke by default; set null for full LOSO
+
+thresholding:
+  policy: f1
+  allow_pathological: false
+  prevalence_rate_tolerance: 0.25
 
 targets:
   multi_head:
