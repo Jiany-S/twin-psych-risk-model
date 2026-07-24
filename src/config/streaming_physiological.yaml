@@ -7,7 +7,7 @@ replay:
   seed: 42
   fast_model_name: tcn
   slow_model_name: xgboost
+  manifest_path: experiments/runs/replay_manifest_wesad_smoke.yaml
 
 physical_kernel:
   enabled: false
-

@@ -19,5 +19,4 @@ flowchart TD
 
 Physiological ML is outside any certified emergency-stop chain. Physical emergency and protective rules have higher authority than ML layers. The physical kernel is configurable deterministic logic inspired by separation-monitoring and stopping-distance principles; it is not an ISO-compliant implementation.
 
-Artifact provenance is saved through config hashes, artifact paths, artifact hashes, split subjects, target definitions, timing settings, and model version fields where prediction artifacts are available.
-
+Artifact provenance is saved through config hashes, artifact paths, artifact hashes, split subjects, target definitions, timing settings, and model version fields where prediction artifacts are available. Real-model physiological replay requires an explicit replay manifest and writes `artifact_pairing_report.json`; it does not select arbitrary latest fast/slow runs.

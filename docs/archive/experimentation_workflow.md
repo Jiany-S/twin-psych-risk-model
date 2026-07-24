@@ -81,3 +81,4 @@ For an existing run:
 ```bash
 python scripts/make_paper_summary.py --run_dir experiments/runs/<timestamp>
 ```
+# Historical document. This report is preserved for provenance and is not the current source of truth.

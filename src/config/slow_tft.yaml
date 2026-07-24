@@ -1,12 +1,13 @@
 paths:
   run_root: experiments/runs
+  replay_manifest: experiments/runs/replay_manifest_wesad_smoke.yaml
 
 dataset:
   name: wesad
   source: local
   path: data/wesad/wesad_subset
   format: auto
-  subjects: ["S2", "S3", "S4", "S5", "S6"]
+  subjects: ["S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"]
   max_rows_per_subject: null
   stress_include_amusement: true
 
@@ -52,9 +53,9 @@ calibration:
 
 split:
   mode: subject_holdout
-  train_subjects: ["S2", "S3"]
-  validation_subjects: ["S4"]
-  test_subjects: ["S5", "S6"]
+  train_subjects: ["S2", "S3", "S4", "S5"]
+  validation_subjects: ["S6", "S7"]
+  test_subjects: ["S8", "S9"]
 
 features:
   timestamp: timestamp
@@ -69,4 +70,3 @@ features:
     task_phase: task_phase
     specialization_col: specialization_index
     experience_col: experience_level
-

@@ -45,6 +45,7 @@ from ..data.multihorizon_windowing import (
 from ..data.schema import DataSchema
 from ..models.fast_tcn import FastTCN
 from ..models.tft_model import SlowTFTForecaster, build_tft_datasets, count_parameters, create_tft_model, model_size_bytes, resolve_tft_loss
+from ..streaming.prediction_artifacts import write_replay_manifest_fragment
 from .metrics import classification_metrics, expected_calibration_error, regression_metrics, select_threshold_from_validation
 
 
@@ -693,6 +694,7 @@ def run_slow_forecaster(config_path: str | Path) -> Path:
 
     predictions = pd.concat(prediction_frames, ignore_index=True)
     predictions.to_csv(run_dir / "predictions_long.csv", index=False)
+    write_replay_manifest_fragment("slow", run_dir, cfg, "predictions_long.csv", "xgboost")
     metrics = pd.DataFrame(metric_rows)
     metrics.to_csv(run_dir / "slow_metrics.csv", index=False)
     (run_dir / "slow_metrics.json").write_text(json.dumps(metric_rows, indent=2, default=_json_default), encoding="utf-8")

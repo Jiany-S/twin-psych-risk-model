@@ -23,7 +23,7 @@ This report documents the Prompt 4 personalization refactor and smoke ablations.
 | `experiments/runs/20260721_155016` | `src/config/multiphysio_ablation_calibration.yaml` | calibration | none | 0.000 | Same split/features as global run. |
 | `experiments/runs/20260721_155206` | `src/config/multiphysio_ablation_calibration_features.yaml` | calibration | 16 calibration columns | 0.000 | Adds baseline mean/std/median/IQR for four MultiPhysio modalities. |
 | `experiments/runs/20260721_155241` | `src/config/multiphysio_ablation_calibration_metadata.yaml` | calibration | 16 calibration columns + `experience_metadata` | 0.000 | Adds real MultiPhysio experience metadata; role disabled. |
-| `experiments/runs/20260721_155518` | `src/config/wesad_tiny.yaml` | global | 12 calibration columns | 0.000 | WESAD tiny raw-signal run, includes TFT execution check. |
+| `experiments/runs/20260721_155518` | `docs/archive/configs/wesad_tiny.yaml` | global | 12 calibration columns | 0.000 | Historical WESAD tiny raw-signal run, includes TFT execution check. |
 
 ## MultiPhysio Metrics
 

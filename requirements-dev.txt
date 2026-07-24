@@ -1,4 +1,4 @@
 -r requirements.txt
 pytest>=8.3,<9
+pytest-timeout>=2.3,<3
 ruff>=0.6,<1
-

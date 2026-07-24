@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +10,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from src.utils.artifacts import config_hash, file_sha256, git_commit, latest_run
+from src.utils.artifacts import config_hash, file_sha256, git_commit
 
 
 REQUIRED_COLUMNS = {
@@ -26,6 +27,13 @@ REQUIRED_COLUMNS = {
     "model_version",
     "config_hash",
 }
+
+
+@dataclass(frozen=True)
+class ReplayArtifactPair:
+    fast: pd.DataFrame
+    slow: pd.DataFrame
+    report: dict[str, Any]
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -73,6 +81,10 @@ def standardize_fast_predictions(run_dir: str | Path, model_name: str) -> pd.Dat
             "validation_subjects": ",".join(_subjects_from_config(cfg, "validation")),
             "test_subjects": ",".join(_subjects_from_config(cfg, "test")),
             "target_definition": "WESAD protocol stress state; class 1=stress, class 0=baseline/amusement",
+            "target_name": cfg.get("experiment", {}).get("primary_target", "stress"),
+            "positive_class": cfg.get("targets", {}).get("stress", {}).get("positive_class", "stress"),
+            "timestamp_unit": "seconds",
+            "stream_representation": cfg.get("stream", {}).get("representation"),
             "context_seconds": cfg.get("fast_model", {}).get("context_seconds"),
             "forecast_horizon_seconds": cfg.get("fast_model", {}).get("forecast_horizon_seconds", 0.0),
             "inference_stride_seconds": cfg.get("fast_model", {}).get("inference_stride_seconds"),
@@ -112,6 +124,10 @@ def standardize_slow_predictions(run_dir: str | Path, model_name: str) -> pd.Dat
             "validation_subjects": ",".join(_subjects_from_config(cfg, "validation")),
             "test_subjects": ",".join(_subjects_from_config(cfg, "test")),
             "target_definition": "WESAD protocol stress forecast; class 1=stress",
+            "target_name": cfg.get("experiment", {}).get("primary_target", "stress"),
+            "positive_class": cfg.get("targets", {}).get("stress", {}).get("positive_class", "stress"),
+            "timestamp_unit": "seconds",
+            "stream_representation": cfg.get("stream", {}).get("representation"),
             "context_seconds": cfg.get("slow_model", {}).get("context_seconds"),
             "forecast_horizon_seconds": df["horizon_seconds"],
             "inference_stride_seconds": cfg.get("slow_model", {}).get("inference_stride_seconds"),
@@ -149,12 +165,130 @@ def validate_prediction_contract(df: pd.DataFrame, expected_test_subjects: list[
     return out.reset_index(drop=True)
 
 
-def discover_prediction_artifacts(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    replay_cfg = cfg.get("replay", {})
-    root = cfg.get("paths", {}).get("run_root", "experiments/runs")
-    fast_dir = replay_cfg.get("fast_prediction_run_dir") or str(latest_run(root, "fast_wesad_"))
-    slow_dir = replay_cfg.get("slow_prediction_run_dir") or str(latest_run(root, "slow_tft_"))
-    fast_model = str(replay_cfg.get("fast_model_name", "tcn"))
-    slow_model = str(replay_cfg.get("slow_model_name", "xgboost"))
-    return standardize_fast_predictions(fast_dir, fast_model), standardize_slow_predictions(slow_dir, slow_model)
+def write_replay_manifest_fragment(role: str, run_dir: str | Path, cfg: dict[str, Any], prediction_file: str, model_name: str) -> None:
+    manifest_path = cfg.get("paths", {}).get("replay_manifest")
+    if not manifest_path:
+        return
+    path = Path(manifest_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = _load_yaml(path)
+    manifest.setdefault("replay_manifest_version", 1)
+    manifest[role] = {
+        "run_dir": str(Path(run_dir)),
+        "prediction_file": prediction_file,
+        "metadata_file": "config_resolved.yaml",
+        "model_name": model_name,
+    }
+    split = cfg.get("split", {})
+    manifest["alignment"] = {
+        "subjects": [str(s) for s in split.get("test_subjects", [])],
+        "target_name": cfg.get("experiment", {}).get("primary_target", "stress"),
+        "positive_class": cfg.get("targets", {}).get("stress", {}).get("positive_class", "stress"),
+        "probability_column": "calibrated_probability",
+        "timestamp_unit": "seconds",
+        "stream_representation": cfg.get("stream", {}).get("representation", "raw_signal"),
+        "join_policy": "exact_prediction_timestamp",
+        "minimum_overlap_fraction": 0.01,
+    }
+    path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
 
+
+def load_prediction_artifacts_from_manifest(cfg: dict[str, Any]) -> ReplayArtifactPair:
+    replay_cfg = cfg.get("replay", {})
+    manifest_path = replay_cfg.get("manifest_path")
+    if not manifest_path:
+        raise ValueError(
+            "Real-model physiological replay requires replay.manifest_path. "
+            "Do not rely on implicit latest-run artifact discovery."
+        )
+    manifest = _load_yaml(Path(manifest_path))
+    if int(manifest.get("replay_manifest_version", 0)) != 1:
+        raise ValueError(f"Unsupported replay manifest version in {manifest_path}.")
+    for section in ("fast", "slow", "alignment"):
+        if section not in manifest:
+            raise ValueError(f"Replay manifest {manifest_path} missing required section: {section}")
+    fast_cfg = manifest["fast"]
+    slow_cfg = manifest["slow"]
+    for role, section in (("fast", fast_cfg), ("slow", slow_cfg)):
+        for key in ("run_dir", "prediction_file", "metadata_file", "model_name"):
+            if key not in section:
+                raise ValueError(f"Replay manifest {manifest_path} missing {role}.{key}")
+        metadata = Path(section["run_dir"]) / str(section["metadata_file"])
+        if not metadata.exists():
+            raise FileNotFoundError(f"Replay manifest {manifest_path} references missing metadata file: {metadata}")
+    fast = standardize_fast_predictions(fast_cfg["run_dir"], str(fast_cfg["model_name"]))
+    slow = standardize_slow_predictions(slow_cfg["run_dir"], str(slow_cfg["model_name"]))
+    report = validate_artifact_pairing(fast, slow, manifest)
+    return ReplayArtifactPair(fast=fast, slow=slow, report=report)
+
+
+def validate_artifact_pairing(fast: pd.DataFrame, slow: pd.DataFrame, manifest: dict[str, Any]) -> dict[str, Any]:
+    alignment = manifest.get("alignment", {})
+    requested_subjects = {str(s) for s in alignment.get("subjects", [])}
+    if not requested_subjects:
+        raise ValueError("Replay manifest alignment.subjects must be non-empty.")
+    report: dict[str, Any] = {
+        "validation_checks": {},
+        "shared_subjects": [],
+        "timestamp_coverage": {},
+        "dropped_prediction_count": {},
+        "join_policy": alignment.get("join_policy"),
+        "compatibility_decision": "rejected",
+    }
+    fast_subjects = set(fast["worker_id"].astype(str).unique())
+    slow_subjects = set(slow["worker_id"].astype(str).unique())
+    shared = sorted((fast_subjects & slow_subjects) & requested_subjects)
+    report["shared_subjects"] = shared
+    checks = report["validation_checks"]
+    checks["subjects_overlap"] = bool(shared)
+    checks["requested_subjects_available"] = requested_subjects.issubset(fast_subjects) and requested_subjects.issubset(slow_subjects)
+    checks["target_name_match"] = _single_value(fast, "target_name") == _single_value(slow, "target_name") == alignment.get("target_name")
+    checks["positive_class_match"] = _single_value(fast, "positive_class") == _single_value(slow, "positive_class") == alignment.get("positive_class")
+    checks["timestamp_unit_match"] = _single_value(fast, "timestamp_unit") == _single_value(slow, "timestamp_unit") == alignment.get("timestamp_unit")
+    checks["stream_representation_match"] = _single_value(fast, "stream_representation") == _single_value(slow, "stream_representation") == alignment.get("stream_representation")
+    checks["config_hashes_present"] = fast["config_hash"].astype(str).str.len().all() and slow["config_hash"].astype(str).str.len().all()
+    if alignment.get("join_policy") != "exact_prediction_timestamp":
+        raise ValueError("Only exact_prediction_timestamp replay join policy is supported.")
+    fast_aligned = fast[fast["worker_id"].astype(str).isin(shared)]
+    slow_aligned = slow[slow["worker_id"].astype(str).isin(shared)]
+    fast_keys = fast_aligned[["worker_id", "session_id", "prediction_timestamp"]].drop_duplicates()
+    slow_keys = slow_aligned[["worker_id", "session_id", "prediction_timestamp"]].drop_duplicates()
+    overlap = fast_keys.merge(slow_keys, on=["worker_id", "session_id", "prediction_timestamp"], how="inner")
+    denominator = max(1, min(len(fast_keys), len(slow_keys)))
+    overlap_fraction = len(overlap) / denominator
+    minimum_overlap = float(alignment.get("minimum_overlap_fraction", 0.01))
+    checks["timestamp_overlap_sufficient"] = overlap_fraction >= minimum_overlap
+    report["timestamp_coverage"] = {
+        "fast_prediction_origins": int(len(fast_keys)),
+        "slow_prediction_origins": int(len(slow_keys)),
+        "aligned_prediction_origins": int(len(overlap)),
+        "overlap_fraction": float(overlap_fraction),
+        "minimum_overlap_fraction": minimum_overlap,
+    }
+    report["dropped_prediction_count"] = {
+        "fast": int(len(fast_keys) - len(overlap)),
+        "slow": int(len(slow_keys) - len(overlap)),
+    }
+    merged_targets = fast_aligned.merge(
+        slow_aligned,
+        on=["worker_id", "session_id", "prediction_timestamp", "target_timestamp", "horizon_seconds"],
+        suffixes=("_fast", "_slow"),
+    )
+    if not merged_targets.empty:
+        checks["overlapping_targets_agree"] = bool((merged_targets["target_fast"] == merged_targets["target_slow"]).all())
+    else:
+        checks["overlapping_targets_agree"] = True
+    failed = [name for name, passed in checks.items() if not bool(passed)]
+    if failed:
+        raise ValueError(f"Incompatible replay artifacts: {failed}")
+    report["compatibility_decision"] = "accepted"
+    return report
+
+
+def _single_value(df: pd.DataFrame, column: str) -> Any:
+    if column not in df:
+        return None
+    values = {str(v) for v in df[column].dropna().unique()}
+    if len(values) != 1:
+        raise ValueError(f"Prediction artifact column {column} must contain exactly one value, found {sorted(values)}")
+    return next(iter(values))

@@ -1,5 +1,6 @@
 paths:
   run_root: experiments/runs
+  replay_manifest: experiments/runs/replay_manifest_wesad_smoke.yaml
 
 dataset:
   name: wesad

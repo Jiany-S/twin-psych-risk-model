@@ -69,30 +69,27 @@ python scripts/sanity_check.py
 python -m src.run_experiment --config src/config/default.yaml
 ```
 
-### TFT Dataset Debug
+### Slow Forecaster Debug
 ```bash
-python scripts/debug_tft_dataset.py --config src/config/wesad_debug_tft.yaml
+python -m src.training.tft_train --config src/config/slow_tft.yaml
 ```
 
-### WESAD Pilot (Profiles On/Off)
+### WESAD Fast/Slow Smoke
 ```bash
-# Linux/macOS
-bash scripts/run_wesad_pilot.sh
-
-# Windows
-scripts\run_wesad_pilot.bat
+python -m src.training.fast_train --config src/config/fast_wesad.yaml
+python -m src.training.tft_train --config src/config/slow_tft.yaml
 ```
 
-### Paper Summary From Existing Run
+### Physiological Replay
 ```bash
-python scripts/make_paper_summary.py --run_dir experiments/runs/<timestamp>
+python -m src.streaming.replay --config src/config/streaming_physiological.yaml
 ```
 
 ## Validation Gates Before Handoff
 Run the smallest gate that proves the change:
 1. For utility or metric logic changes: run `python scripts/sanity_check.py`.
 2. For pipeline/orchestration changes: run one config via `src.run_experiment`.
-3. For TFT dataset/windowing changes: run `scripts/debug_tft_dataset.py` plus one experiment run.
+3. For slow forecasting or windowing changes: run `python -m src.training.tft_train --config src/config/slow_tft.yaml` plus the relevant tests.
 
 Handoff must include:
 - What changed and why.

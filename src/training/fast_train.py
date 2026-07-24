@@ -34,6 +34,7 @@ from src.data.load_wesad import load_wesad_dataset
 from src.data.schema import DataSchema
 from src.models.fast_tcn import FastTCN, count_parameters, model_size_bytes
 from src.streaming.fast_detector import causal_feature_names, causal_window_features
+from src.streaming.prediction_artifacts import write_replay_manifest_fragment
 from src.training.metrics import expected_calibration_error, select_threshold_from_validation
 
 
@@ -439,6 +440,8 @@ def run(config_path: str | Path) -> Path:
     diagnostic_predictions.to_csv(run_dir / "diagnostic_predictions.csv", index=False)
     metrics_df.to_csv(run_dir / "fast_metrics.csv", index=False)
     (run_dir / "fast_metrics.json").write_text(json.dumps(metrics_rows, indent=2, default=_json_default), encoding="utf-8")
+    if (run_dir / "predictions_tcn.csv").exists():
+        write_replay_manifest_fragment("fast", run_dir, cfg, "predictions_tcn.csv", "tcn")
     cols = ["model", "auroc", "auprc", "f1", "balanced_accuracy", "brier", "ece", "latency_p95_ms", "model_size_bytes"]
     summary = [
         "# Fast WESAD Detector Run",

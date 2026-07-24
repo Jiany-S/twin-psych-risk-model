@@ -1,0 +1,23 @@
+replay_manifest_version: 1
+
+fast:
+  run_dir: experiments/runs/fast_wesad_YYYYMMDD_HHMMSS
+  prediction_file: predictions_tcn.csv
+  metadata_file: config_resolved.yaml
+  model_name: tcn
+
+slow:
+  run_dir: experiments/runs/slow_tft_YYYYMMDD_HHMMSS
+  prediction_file: predictions_long.csv
+  metadata_file: config_resolved.yaml
+  model_name: xgboost
+
+alignment:
+  subjects: [S8, S9]
+  target_name: stress
+  positive_class: stress
+  probability_column: calibrated_probability
+  timestamp_unit: seconds
+  stream_representation: raw_signal
+  join_policy: exact_prediction_timestamp
+  minimum_overlap_fraction: 0.01

@@ -18,8 +18,9 @@ from src.data.schema import DataSchema
 from src.safety.adapters import FastDetectorAdapter, SlowForecasterAdapter
 from src.safety.physical_kernel import PhysicalKernelResult, PhysicalSafetyKernel, SafetyState
 from src.safety.state_machine import SafetyStateMachine, TransitionResult
-from src.streaming.prediction_artifacts import discover_prediction_artifacts
+from src.streaming.prediction_artifacts import load_prediction_artifacts_from_manifest
 from src.utils.artifacts import config_hash, git_commit
+from src.utils.io import load_config_with_base
 
 
 LOGGER = logging.getLogger(__name__)
@@ -178,10 +179,21 @@ def synthetic_ml_events(cfg: dict[str, Any], physical: pd.DataFrame) -> pd.DataF
     return pd.DataFrame(rows)
 
 
-def physiological_events(cfg: dict[str, Any]) -> pd.DataFrame:
+def physiological_events(cfg: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, Any] | None]:
     source = str(cfg.get("replay", {}).get("probability_source", "saved_predictions"))
     if source == "saved_predictions":
-        fast, slow = discover_prediction_artifacts(cfg)
+        pair = load_prediction_artifacts_from_manifest(cfg)
+        fast = pair.fast
+        slow = pair.slow
+        shared_subjects = set(pair.report.get("shared_subjects", []))
+        origin_keys = fast[fast["worker_id"].isin(shared_subjects)][["worker_id", "session_id", "prediction_timestamp"]].drop_duplicates()
+        origin_keys = origin_keys.merge(
+            slow[slow["worker_id"].isin(shared_subjects)][["worker_id", "session_id", "prediction_timestamp"]].drop_duplicates(),
+            on=["worker_id", "session_id", "prediction_timestamp"],
+            how="inner",
+        )
+        fast = fast.merge(origin_keys, on=["worker_id", "session_id", "prediction_timestamp"], how="inner")
+        slow = slow.merge(origin_keys, on=["worker_id", "session_id", "prediction_timestamp"], how="inner")
         events: list[dict[str, Any]] = []
         for _, row in fast.iterrows():
             events.append(
@@ -220,7 +232,7 @@ def physiological_events(cfg: dict[str, Any]) -> pd.DataFrame:
                     "model_artifact_hash": ",".join(sorted(group["source_artifact_hash"].astype(str).unique())),
                 }
             )
-        return pd.DataFrame(events)
+        return pd.DataFrame(events), pair.report
     if source != "oracle_labels":
         raise ValueError(
             "replay.probability_source must be saved_predictions, live_models, or oracle_labels. "
@@ -247,7 +259,7 @@ def physiological_events(cfg: dict[str, Any]) -> pd.DataFrame:
         base = {"timestamp": float(row[schema.timestamp]), "worker_id": str(row[schema.worker_id]), "session_id": str(row[schema.worker_id])}
         rows.append({**base, "event_type": "fast", "probability": p_fast, "target": int(row[schema.primary_target]), "protocol_label": row[schema.protocol_label], "model_version": "oracle_label_generator_v1"})
         rows.append({**base, "event_type": "slow", "probability_5s": p_slow_5, "probability_30s": p_slow_30, "target": int(row[schema.primary_target]), "target_5s": int(row[schema.primary_target]), "target_30s": int(row[schema.primary_target]), "protocol_label": row[schema.protocol_label], "model_version": "oracle_label_generator_v1"})
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows), None
 
 
 class ReplayEngine:
@@ -567,17 +579,17 @@ class ReplayEngine:
         }
 
 
-def build_events(cfg: dict[str, Any]) -> pd.DataFrame:
+def build_events(cfg: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, Any] | None]:
     mode = str(cfg.get("replay", {}).get("mode", "combined_simulation"))
     if mode == "physiological":
         return physiological_events(cfg)
     physical = synthetic_physical_events(cfg)
     physical["event_type"] = "physical"
     if mode == "synthetic_physical":
-        return physical
+        return physical, None
     if mode == "combined_simulation":
         ml = synthetic_ml_events(cfg, physical)
-        return pd.concat([physical, ml], ignore_index=True)
+        return pd.concat([physical, ml], ignore_index=True), None
     raise ValueError(f"Unsupported replay mode: {mode}")
 
 
@@ -742,33 +754,20 @@ def run(config_path: str | Path) -> Path:
     meta = result_metadata(cfg)
     run_dir = _run_dir(cfg.get("paths", {}).get("run_root", "experiments/runs"), meta["result_category"])
     (run_dir / "config_resolved.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
-    events = build_events(cfg)
+    events, pairing_report = build_events(cfg)
     engine = ReplayEngine(cfg)
     engine.run(events, run_dir)
+    if pairing_report is not None:
+        (run_dir / "artifact_pairing_report.json").write_text(
+            json.dumps(pairing_report, indent=2, default=_json_default),
+            encoding="utf-8",
+        )
     print(f"Streaming replay artifacts saved to {run_dir}")
     return run_dir
 
 
-def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(base)
-    for key, value in override.items():
-        if key == "_base_":
-            continue
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = _deep_merge(merged[key], value)
-        else:
-            merged[key] = value
-    return merged
-
-
 def _load_config(path: str | Path) -> dict[str, Any]:
-    cfg_path = Path(path)
-    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    if isinstance(cfg, dict) and cfg.get("_base_"):
-        base_path = cfg_path.parent / str(cfg["_base_"])
-        base_cfg = _load_config(base_path)
-        return _deep_merge(base_cfg, cfg)
-    return cfg
+    return load_config_with_base(path)
 
 
 def main() -> None:

@@ -32,5 +32,15 @@ def load_merged_yaml(default_path: str | Path, override_path: str | Path) -> dic
     return deep_merge_dicts(default_cfg, override_cfg)
 
 
+def load_config_with_base(path: str | Path) -> dict[str, Any]:
+    """Load a YAML config and recursively resolve local `_base_` references."""
+    cfg_path = Path(path)
+    cfg = load_yaml(cfg_path)
+    if cfg.get("_base_"):
+        base_cfg = load_config_with_base(cfg_path.parent / str(cfg["_base_"]))
+        return deep_merge_dicts(base_cfg, {k: v for k, v in cfg.items() if k != "_base_"})
+    return cfg
+
+
 def save_json(data: dict[str, Any], path: str | Path) -> None:
     Path(path).write_text(json.dumps(data, indent=2), encoding="utf-8")

@@ -104,12 +104,14 @@ Physiological ML cannot request emergency stop. The replay engine emits recommen
 
 | Config | Result category |
 | --- | --- |
-| `src/config/streaming_physiological.yaml` | `real_model_physiological_replay` using saved held-out prediction artifacts |
+| `src/config/streaming_physiological.yaml` | `real_model_physiological_replay` using saved held-out prediction artifacts from an explicit replay manifest |
 | `src/config/streaming_physiological_oracle.yaml` | `oracle_label_policy_simulation` |
 | `src/config/streaming_synthetic_physical.yaml` | `synthetic_physical_safety_simulation` |
 | `src/config/streaming_multirate.yaml` | `combined_integration_simulation` |
 
 Oracle-label and synthetic simulations are not empirical model validation.
+
+Real-model physiological replay requires a compatible manifest at `experiments/runs/replay_manifest_wesad_smoke.yaml`, written by the fast and slow WESAD training commands above. The replay command fails rather than pairing arbitrary latest runs.
 
 ## Reproduction Commands
 
@@ -136,15 +138,8 @@ ruff check src scripts tests
 
 ## Key Documentation
 
-- `docs/dataset_limitations.md`
-- `docs/model_comparison.md`
-- `docs/validated_claims.md`
-- `docs/final_architecture.md`
-- `docs/multirate_architecture.md`
-- `docs/reproducibility_checklist.md`
-- `docs/research_roadmap.md`
+Start at `docs/README.md` for the current source-of-truth documentation, audits, and archived historical reports.
 
 ## Limitations
 
 WESAD has experimentally induced stress protocol labels, not construction hazards. Local MultiPhysio lacks raw/filtered high-rate physiology. Neither dataset contains complete robot distance, velocity, stopping-distance, construction near-miss labels, or physical intervention outcomes. Synthetic replay validates software invariants only.
-

@@ -21,13 +21,18 @@ dist/
 
 *.log
 coverage.*
+.coverage
 htmlcov/
 
 artifacts/
 experiments/
+experiments/runs/
 checkpoints/
 lightning_logs/
 wandb/
+*.ckpt
+*.pkl
+*.joblib
 
 .idea/
 .vscode/
