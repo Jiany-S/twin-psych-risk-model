@@ -1,0 +1,8 @@
+_base_: streaming_physiological.yaml
+
+replay:
+  mode: physiological
+  probability_source: oracle_labels
+  accelerated: true
+  seed: 42
+

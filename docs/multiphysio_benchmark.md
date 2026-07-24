@@ -1,6 +1,6 @@
 # MultiPhysio Benchmark
 
-Run directory: `experiments\runs\multiphysio_cv_20260723_135339`
+Run directory: `experiments\runs\multiphysio_cv_20260723_195159`
 
 This benchmark uses `leave_one_subject_out` grouped by subject over `bio_features_60s.csv`. This run is capped at `5` held-out folds for smoke validation; set `cv.max_folds: null` for full LOSO. One row is a 60-second precomputed physiological feature interval, suitable for slow workload or affect estimation, not immediate safety intervention.
 

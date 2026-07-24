@@ -1,6 +1,6 @@
 # Fast WESAD Diagnostics
 
-Run directory: `experiments\runs\fast_wesad_20260723_150036`
+Run directory: `experiments\runs\fast_wesad_20260723_200607`
 
 Baseline maps to class 0 and stress maps to class 1 in `src/data/load_wesad.py`.
 Amusement handling: `stress_include_amusement=True`.

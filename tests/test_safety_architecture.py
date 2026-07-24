@@ -9,6 +9,7 @@ from src.safety.adapters import FastDetectorAdapter, SlowForecasterAdapter
 from src.safety.physical_kernel import PhysicalSafetyKernel, SafetyState
 from src.safety.state_machine import SafetyStateMachine
 from src.streaming.replay import ReplayEngine, _load_config, build_events
+from src.streaming.prediction_artifacts import validate_prediction_contract
 
 
 def _physical_sample(timestamp: float = 0.0, **overrides):
@@ -146,6 +147,49 @@ def test_replay_deterministic_after_timestamp_sorting(tmp_path):
     t2 = pd.read_csv(run2 / "timeline.csv")
     pd.testing.assert_series_equal(t1["new_state"], t2["new_state"], check_names=False)
     pd.testing.assert_series_equal(t1["requested_action"], t2["requested_action"], check_names=False)
+
+
+def test_invalid_probability_is_not_deadline_miss(tmp_path):
+    cfg = _load_config("src/config/streaming_multirate.yaml")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    events = pd.DataFrame(
+        [
+            {"timestamp": 0.0, "worker_id": "A", "session_id": "A", "event_type": "physical", **_physical_sample(0.0)},
+            {"timestamp": 0.0, "worker_id": "A", "session_id": "A", "event_type": "fast", "probability": float("nan")},
+        ]
+    )
+    ReplayEngine(cfg).run(events, run_dir)
+    latency = __import__("json").loads((run_dir / "latency.json").read_text())
+    assert latency["fast_invalid_probability_count"] == 1
+    assert latency["fast_deadline_miss_count"] == 0
+
+
+def test_prediction_artifact_contract_rejects_bad_probabilities_and_duplicates():
+    good = pd.DataFrame(
+        {
+            "worker_id": ["S1"],
+            "session_id": ["S1"],
+            "prediction_timestamp": [1.0],
+            "target_timestamp": [1.0],
+            "horizon_seconds": [0.0],
+            "model_name": ["tcn"],
+            "probability": [0.3],
+            "calibrated_probability": [0.3],
+            "target": [0],
+            "split": ["test"],
+            "model_version": ["fast_tcn"],
+            "config_hash": ["abc"],
+        }
+    )
+    assert len(validate_prediction_contract(good, expected_test_subjects=["S1"])) == 1
+    bad = pd.concat([good, good], ignore_index=True)
+    with pytest.raises(ValueError, match="duplicate"):
+        validate_prediction_contract(bad)
+    bad_prob = good.copy()
+    bad_prob["calibrated_probability"] = 1.2
+    with pytest.raises(ValueError, match="outside"):
+        validate_prediction_contract(bad_prob)
 
 
 def test_cross_worker_state_contamination_does_not_occur(tmp_path):

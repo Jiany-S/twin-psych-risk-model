@@ -49,6 +49,8 @@ flowchart TD
 
 `EMERGENCY_STOP` is latched. It requires explicit reset, emergency condition cleared, valid physical inputs, and the configured reset hold time. Invalid or stale physical inputs trigger degraded or protective behavior according to configuration; the implementation must not silently continue normal operation with invalid required physical inputs.
 
+`DEGRADED` is represented as a state in the current implementation so artifacts and tests can assert a concrete output. Semantically it is a system-health condition with an associated configured action (`controlled_stop` by default), not evidence of physiological severity. It remains below physical protective and emergency stops and above ML advisory states in the current priority table to avoid stale or invalid required inputs being cleared by normal ML outputs.
+
 ## Actions
 
 Actions are recommendations or commands for a supervisory layer, not direct hardware actuation:
@@ -86,4 +88,3 @@ Modes B and C are software-only simulations and must not be called empirical val
 The fast model status is WESAD current physiological stress-state detection. The slow model status is WESAD protocol stress forecasting at 5s and 30s horizons. WESAD labels are long contiguous experimental protocol blocks, so 5s and 30s targets are frequently identical after boundary-crossing windows are removed. Strong slow-model ranking does not demonstrate useful real-world early warning.
 
 The local MultiPhysio data has no raw or filtered high-rate physiological streams. Neither WESAD nor local MultiPhysio contains complete robot distance, velocity, stopping-distance, construction near-miss labels, or physical hazard-event ground truth.
-
